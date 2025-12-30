@@ -2437,6 +2437,7 @@ pub fn build(b: *std.Build) void {
         "tokenize",
         "parse",
         "canonicalize",
+        "typecheck",
     };
     for (names) |name| {
         add_fuzz_target(
