@@ -50,7 +50,7 @@ jobs:
           ./solana-zig/zig version
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Create version.txt
         run: ./ci/write_version.sh
@@ -126,7 +126,7 @@ jobs:
           githubToken: ${{ github.token }}
           install: |
             apt-get update
-            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2
+            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2 lsb-release software-properties-common gnupg
             wget https://apt.llvm.org/llvm.sh
             chmod +x llvm.sh
             ./llvm.sh 18
@@ -206,7 +206,7 @@ jobs:
           ./solana-zig/zig version
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Create version.txt
         run: ./ci/write_version.sh
@@ -284,7 +284,7 @@ jobs:
           ./solana-zig/zig version
 
       - name: Install Rust
-        uses: dtolnay/rust-action@stable
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Create version.txt
         run: ./ci/write_version.sh
