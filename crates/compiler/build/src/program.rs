@@ -850,7 +850,7 @@ fn build_loaded_file<'a>(
 
     let built_host_opt =
         // Not sure if this is correct for all calls with LinkType::Dylib...
-        if link_type == LinkType::None || link_type == LinkType::Dylib || target == Target::Wasm32 {
+        if link_type == LinkType::None || link_type == LinkType::Dylib || target == Target::Wasm32 || target == Target::Sbf {
             BuiltHostOpt::None
         } else {
             let prebuilt_host = determine_built_host_path(&platform_main_roc_path, target, build_host_requested, link_type, linking_strategy, suppress_build_host_warning);
@@ -963,8 +963,12 @@ fn build_loaded_file<'a>(
             );
         }
         (LinkingStrategy::Additive, _) | (LinkingStrategy::Legacy, LinkType::None) => {
-            // Just copy the object file to the output folder.
             std::fs::write(&output_exe_path, &*roc_app_bytes).unwrap();
+        }
+        (_, _) if target == Target::Sbf => {
+            let bc_path = output_exe_path.with_extension("bc");
+            std::fs::write(&bc_path, &*roc_app_bytes).unwrap();
+            eprintln!("Wrote SBF bitcode to {}", bc_path.display());
         }
         (LinkingStrategy::Legacy, _) => {
             let extension = if target == Target::Wasm32 {
