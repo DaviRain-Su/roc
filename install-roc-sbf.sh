@@ -8,41 +8,23 @@ output_dir="${1:-roc-sbf}"
 output_dir="$(mkdir -p "$output_dir" 2>/dev/null; cd "$output_dir"; pwd)"
 
 arch=$(uname -m)
-case "$arch" in
-  "x86_64")
-    arch="x86_64"
-    ;;
-  "arm64" | "aarch64")
-    arch="aarch64"
-    ;;
-  *)
-    echo "install-roc-sbf.sh: Unsupported architecture: $arch" >&2
-    exit 1
-    ;;
-esac
+os=$(uname -s)
 
-case $(uname -s) in
-  "Linux")
-    os="linux"
-    if [[ "$arch" != "x86_64" ]]; then
-      echo "Error: Linux ARM64 is not yet supported." >&2
-      echo "Only Linux x86_64 is available." >&2
-      exit 1
-    fi
-    ;;
-  "Darwin")
-    os="macos"
-    if [[ "$arch" == "x86_64" ]]; then
-      echo "Error: macOS x86_64 (Intel) is not supported." >&2
-      echo "Only macOS ARM64 (Apple Silicon M1/M2/M3) is available." >&2
-      exit 1
-    fi
-    ;;
-  *)
-    echo "install-roc-sbf.sh: Unsupported OS: $(uname -s)" >&2
-    exit 1
-    ;;
-esac
+# Currently only Linux x86_64 is supported
+if [[ "$os" != "Linux" ]]; then
+  echo "Error: Only Linux is currently supported." >&2
+  echo "macOS support coming soon." >&2
+  exit 1
+fi
+
+if [[ "$arch" != "x86_64" ]]; then
+  echo "Error: Only x86_64 architecture is currently supported." >&2
+  echo "ARM64 support coming soon." >&2
+  exit 1
+fi
+
+os="linux"
+arch="x86_64"
 
 if [[ -z "$ROC_SBF_VERSION" ]]; then
   echo "Fetching latest release version..."

@@ -110,92 +110,9 @@ jobs:
             roc-sbf-linux-x86_64-*.tar.gz.sha256
           retention-days: 7
 
-  build-macos-arm64:
-    name: Build macOS ARM64
-    runs-on: macos-latest
-    timeout-minutes: 120
-    
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install LLVM 18 and dependencies
-        run: |
-          brew install llvm@18 zstd
-          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$(brew --prefix zstd)/lib:$(brew --prefix)/lib" >> $GITHUB_ENV
-
-      - name: Install solana-zig
-        run: |
-          SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-${{ env.SOLANA_ZIG_VERSION }}"
-          curl -LO "${SOLANA_ZIG_URL}/zig-aarch64-macos-none.tar.bz2"
-          tar -xjf zig-aarch64-macos-none.tar.bz2
-          mv zig-aarch64-macos-none-baseline solana-zig
-          ./solana-zig/zig version
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Create version.txt
-        run: ./ci/write_version.sh
-
-      - name: Build SBF builtins
-        run: |
-          cd crates/compiler/builtins/bitcode
-          $GITHUB_WORKSPACE/solana-zig/zig build ir-sbf
-
-      - name: Build Roc with SBF support
-        run: |
-          cargo build \
-            --profile=release-with-lto \
-            --locked \
-            --features target-bpf \
-            --bin roc \
-            --bin roc_language_server
-
-      - name: Strip binaries
-        run: |
-          strip ./target/release-with-lto/roc
-          strip ./target/release-with-lto/roc_language_server
-
-      - name: Get version info
-        run: |
-          if [ "${{ github.event.inputs.version }}" != "" ] && [ "${{ github.event.inputs.version }}" != "nightly" ]; then
-            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
-          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
-            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
-          else
-            echo "VERSION=nightly-$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
-          fi
-
-      - name: Package release
-        run: |
-          RELEASE_NAME="roc-sbf-macos-aarch64-${{ env.VERSION }}"
-          mkdir -p $RELEASE_NAME/lib
-          
-          cp ./target/release-with-lto/roc $RELEASE_NAME/
-          cp ./target/release-with-lto/roc_language_server $RELEASE_NAME/
-          cp -r ./target/release-with-lto/lib/* $RELEASE_NAME/lib/ 2>/dev/null || true
-          cp LICENSE $RELEASE_NAME/
-          cp version.txt $RELEASE_NAME/
-          
-          mkdir -p $RELEASE_NAME/builtins
-          cp -r crates/compiler/builtins/bitcode/src/* $RELEASE_NAME/builtins/
-          
-          tar -czvf "${RELEASE_NAME}.tar.gz" $RELEASE_NAME
-          shasum -a 256 "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: roc-sbf-macos-aarch64
-          path: |
-            roc-sbf-macos-aarch64-*.tar.gz
-            roc-sbf-macos-aarch64-*.tar.gz.sha256
-          retention-days: 7
-
   create-release:
     name: Create GitHub Release
-    needs: [build-linux-x86_64, build-macos-arm64]
+    needs: [build-linux-x86_64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/sbf-v')
     
@@ -236,10 +153,9 @@ jobs:
             ```bash
             # Linux x86_64
             tar -xzf roc-sbf-linux-x86_64-${{ github.ref_name }}.tar.gz
-            
-            # macOS ARM64 (M1/M2)
-            tar -xzf roc-sbf-macos-aarch64-${{ github.ref_name }}.tar.gz
             ```
+            
+            > Note: Currently only Linux x86_64 is supported. macOS and ARM64 builds coming soon.
             
             ### Usage
             
