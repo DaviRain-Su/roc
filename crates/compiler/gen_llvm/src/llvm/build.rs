@@ -1102,13 +1102,159 @@ pub fn module_from_builtins<'ctx>(
     // Add LLVM intrinsics.
     add_intrinsics(ctx, &module);
 
+    if target == Target::Sbf {
+        fix_inline_intrinsics_for_sbf(ctx, &module);
+    }
+
     module
 }
 
-fn fix_inline_intrinsics_for_sbf<'ctx>(_ctx: &'ctx Context, _module: &Module<'ctx>) {
-    // TODO: Implement inline intrinsic replacement for SBF
-    // Currently, the builtins use utils.memcpy/utils.memset wrappers
-    // which call external C functions instead of @memcpy/@memset for SBF
+fn fix_inline_intrinsics_for_sbf<'ctx>(ctx: &'ctx Context, module: &Module<'ctx>) {
+    use inkwell::values::AnyValue;
+
+    // For SBF targets, replace llvm.memcpy.inline and llvm.memset.inline with
+    // regular memcpy/memset function calls. The inline versions require compile-time
+    // constant sizes (immarg), but Zig generates them with runtime values for slice copies.
+
+    let i8_ptr_type = ctx.ptr_type(inkwell::AddressSpace::default());
+    let i64_type = ctx.i64_type();
+    let i32_type = ctx.i32_type();
+
+    let memcpy_fn = module.get_function("memcpy").unwrap_or_else(|| {
+        let fn_type = i8_ptr_type.fn_type(
+            &[i8_ptr_type.into(), i8_ptr_type.into(), i64_type.into()],
+            false,
+        );
+        module.add_function("memcpy", fn_type, None)
+    });
+
+    let memset_fn = module.get_function("memset").unwrap_or_else(|| {
+        let fn_type = i8_ptr_type.fn_type(
+            &[i8_ptr_type.into(), i32_type.into(), i64_type.into()],
+            false,
+        );
+        module.add_function("memset", fn_type, None)
+    });
+
+    struct Replacement<'ctx> {
+        inst: inkwell::values::InstructionValue<'ctx>,
+        is_memcpy: bool,
+        dest: inkwell::values::PointerValue<'ctx>,
+        src_or_val: inkwell::values::BasicValueEnum<'ctx>,
+        len: inkwell::values::IntValue<'ctx>,
+    }
+
+    let mut replacements: std::vec::Vec<Replacement<'ctx>> = std::vec::Vec::new();
+
+    for func in module.get_functions() {
+        for bb in func.get_basic_blocks() {
+            let mut maybe_inst = bb.get_first_instruction();
+            while let Some(inst) = maybe_inst {
+                if inst.get_opcode() == inkwell::values::InstructionOpcode::Call {
+                    if let Some(called_fn) = inst.get_operand(inst.get_num_operands() - 1) {
+                        if let Some(fn_val) = called_fn.left() {
+                            if let inkwell::values::AnyValueEnum::FunctionValue(fn_ptr) =
+                                fn_val.as_any_value_enum()
+                            {
+                                let name = fn_ptr.get_name().to_string_lossy();
+                                if name.starts_with("llvm.memcpy.inline") {
+                                    if let (Some(dest_either), Some(src_either), Some(len_either)) = (
+                                        inst.get_operand(0),
+                                        inst.get_operand(1),
+                                        inst.get_operand(2),
+                                    ) {
+                                        if let (Some(dest_val), Some(src_val), Some(len_val)) = (
+                                            dest_either.left(),
+                                            src_either.left(),
+                                            len_either.left(),
+                                        ) {
+                                            if let (
+                                                inkwell::values::BasicValueEnum::PointerValue(dest),
+                                                inkwell::values::BasicValueEnum::IntValue(len),
+                                            ) = (dest_val, len_val)
+                                            {
+                                                replacements.push(Replacement {
+                                                    inst,
+                                                    is_memcpy: true,
+                                                    dest,
+                                                    src_or_val: src_val,
+                                                    len,
+                                                });
+                                            }
+                                        }
+                                    }
+                                } else if name.starts_with("llvm.memset.inline") {
+                                    if let (Some(dest_either), Some(val_either), Some(len_either)) = (
+                                        inst.get_operand(0),
+                                        inst.get_operand(1),
+                                        inst.get_operand(2),
+                                    ) {
+                                        if let (Some(dest_val), Some(val), Some(len_val)) = (
+                                            dest_either.left(),
+                                            val_either.left(),
+                                            len_either.left(),
+                                        ) {
+                                            if let (
+                                                inkwell::values::BasicValueEnum::PointerValue(dest),
+                                                inkwell::values::BasicValueEnum::IntValue(len),
+                                            ) = (dest_val, len_val)
+                                            {
+                                                replacements.push(Replacement {
+                                                    inst,
+                                                    is_memcpy: false,
+                                                    dest,
+                                                    src_or_val: val,
+                                                    len,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                maybe_inst = inst.get_next_instruction();
+            }
+        }
+    }
+
+    let builder = ctx.create_builder();
+    for Replacement {
+        inst,
+        is_memcpy,
+        dest,
+        src_or_val,
+        len,
+    } in replacements
+    {
+        builder.position_before(&inst);
+
+        if is_memcpy {
+            if let inkwell::values::BasicValueEnum::PointerValue(src_ptr) = src_or_val {
+                builder
+                    .build_call(memcpy_fn, &[dest.into(), src_ptr.into(), len.into()], "")
+                    .unwrap();
+            }
+        } else {
+            let val_i32 = if let inkwell::values::BasicValueEnum::IntValue(int_val) = src_or_val {
+                if int_val.get_type().get_bit_width() == 8 {
+                    builder.build_int_z_extend(int_val, i32_type, "").unwrap()
+                } else if int_val.get_type().get_bit_width() > 32 {
+                    builder.build_int_truncate(int_val, i32_type, "").unwrap()
+                } else {
+                    int_val
+                }
+            } else {
+                i32_type.const_zero()
+            };
+            builder
+                .build_call(memset_fn, &[dest.into(), val_i32.into(), len.into()], "")
+                .unwrap();
+        }
+
+        inst.erase_from_basic_block();
+    }
 }
 
 fn promote_to_main_function<'a, 'ctx>(
