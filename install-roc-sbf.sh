@@ -24,6 +24,11 @@ esac
 case $(uname -s) in
   "Linux")
     os="linux"
+    if [[ "$arch" != "x86_64" ]]; then
+      echo "Error: Linux ARM64 is not yet supported." >&2
+      echo "Only Linux x86_64 is available." >&2
+      exit 1
+    fi
     ;;
   "Darwin")
     os="macos"
