@@ -55,6 +55,11 @@ jobs:
       - name: Create version.txt
         run: ./ci/write_version.sh
 
+      - name: Build SBF builtins
+        run: |
+          cd crates/compiler/builtins/bitcode
+          zig build ir-sbf
+
       - name: Build Roc with SBF support
         run: |
           RUSTFLAGS="-C target-cpu=x86-64" cargo build \
@@ -126,7 +131,7 @@ jobs:
           githubToken: ${{ github.token }}
           install: |
             apt-get update
-            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2 lsb-release software-properties-common gnupg
+            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2 lsb-release software-properties-common gnupg git
             wget https://apt.llvm.org/llvm.sh
             chmod +x llvm.sh
             ./llvm.sh 18
@@ -143,6 +148,7 @@ jobs:
             export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
             zig version
             ./ci/write_version.sh
+            cd crates/compiler/builtins/bitcode && zig build ir-sbf && cd ../../../..
             cargo build --profile=release-with-lto --locked --features target-bpf --bin roc --bin roc_language_server
             strip ./target/release-with-lto/roc
             strip ./target/release-with-lto/roc_language_server
@@ -210,6 +216,11 @@ jobs:
 
       - name: Create version.txt
         run: ./ci/write_version.sh
+
+      - name: Build SBF builtins
+        run: |
+          cd crates/compiler/builtins/bitcode
+          zig build ir-sbf
 
       - name: Build Roc with SBF support
         run: |
