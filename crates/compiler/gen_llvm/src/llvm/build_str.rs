@@ -43,7 +43,7 @@ pub(crate) fn call_str_from_utf_bitcode_fn<'a, 'ctx>(
             args.push(a.into());
             args.push(b.into());
         }
-        Aarch64 | X86_64 => {
+        Aarch64 | X86_64 | Sbf => {
             let list = pass_list_to_zig_64bit(env, list);
             args.push(list.into());
         }

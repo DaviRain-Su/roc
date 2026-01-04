@@ -4,10 +4,11 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 const std = @import("std");
+const utils = @import("utils.zig");
 const str = @import("str.zig");
 const mem = std.mem;
 
-pub fn wyhash(seed: u64, bytes: ?[*]const u8, length: usize) callconv(.C) u64 {
+pub fn wyhash(seed: u64, bytes: ?[*]const u8, length: usize) callconv(utils.cc) u64 {
     if (bytes) |nonnull| {
         const slice = nonnull[0..length];
         return wyhash_hash(seed, slice);
@@ -16,7 +17,7 @@ pub fn wyhash(seed: u64, bytes: ?[*]const u8, length: usize) callconv(.C) u64 {
     }
 }
 
-pub fn wyhash_rocstr(seed: u64, input: str.RocStr) callconv(.C) u64 {
+pub fn wyhash_rocstr(seed: u64, input: str.RocStr) callconv(utils.cc) u64 {
     return wyhash_hash(seed, input.asSlice());
 }
 

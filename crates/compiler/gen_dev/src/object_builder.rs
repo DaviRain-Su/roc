@@ -416,6 +416,10 @@ fn create_relocation(target: Target, symbol: SymbolId, offset: u64) -> write::Re
             },
             -4,
         ),
+        // SBF uses LLVM backend, not dev backend
+        roc_target::Architecture::Sbf => {
+            unreachable!("SBF target should use LLVM backend, not dev backend")
+        }
     };
 
     write::Relocation {

@@ -255,7 +255,7 @@ pub(crate) fn run_low_level<'a, 'ctx>(
                         }
                     }
                 }
-                Aarch64 | X86_64 => {
+                Aarch64 | X86_64 | Sbf => {
                     let (type_name, width) = {
                         match layout_interner.get_repr(number_layout) {
                             LayoutRepr::Builtin(Builtin::Int(int_width)) => {
@@ -2037,7 +2037,7 @@ fn dec_alloca<'ctx>(env: &Env<'_, 'ctx, '_>, value: IntValue<'ctx>) -> BasicValu
             env.builder
                 .new_build_load(i64_type.array_type(2), alloca, "load as array")
         }
-        Freestanding => unimplemented!(),
+        Freestanding | Solana => unimplemented!(),
     }
 }
 

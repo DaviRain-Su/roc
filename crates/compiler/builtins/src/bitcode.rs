@@ -43,7 +43,7 @@ impl FloatWidth {
         match self {
             F32 => 4,
             F64 => match target.architecture() {
-                X86_64 | Aarch64 | Wasm32 => 8,
+                X86_64 | Aarch64 | Wasm32 | Sbf => 8,
                 X86_32 | Aarch32 => 4,
             },
         }
@@ -117,7 +117,8 @@ impl IntWidth {
                 Architecture::X86_64
                 | Architecture::Aarch64
                 | Architecture::Aarch32
-                | Architecture::Wasm32 => 8,
+                | Architecture::Wasm32
+                | Architecture::Sbf => 8,
                 Architecture::X86_32 => 4,
             },
             U128 | I128 => {
@@ -127,7 +128,10 @@ impl IntWidth {
                 // however, rust does not always think that this is true
                 // Our alignmets here are correct, but they will not match rust/zig/llvm until they update to llvm version 18.
                 match target.architecture() {
-                    Architecture::X86_64 | Architecture::Aarch64 | Architecture::X86_32 => 16,
+                    Architecture::X86_64
+                    | Architecture::Aarch64
+                    | Architecture::X86_32
+                    | Architecture::Sbf => 16,
                     Architecture::Aarch32 | Architecture::Wasm32 => 8,
                 }
             }

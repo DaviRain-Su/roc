@@ -1,0 +1,401 @@
+name: SBF Release Build
+
+on:
+  push:
+    tags:
+      - 'sbf-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g., v0.1.0)'
+        required: false
+        default: 'nightly'
+
+permissions:
+  contents: write
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  SOLANA_ZIG_VERSION: v1.52.0
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev liblld-18-dev libclang-18-dev
+
+      - name: Set LLVM environment
+        run: echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+
+      - name: Install solana-zig
+        run: |
+          SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-${{ env.SOLANA_ZIG_VERSION }}"
+          wget "${SOLANA_ZIG_URL}/zig-x86_64-linux-musl.tar.bz2"
+          tar -xjf zig-x86_64-linux-musl.tar.bz2
+          mv zig-x86_64-linux-musl-baseline solana-zig
+          echo "$PWD/solana-zig" >> $GITHUB_PATH
+          ./solana-zig/zig version
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Create version.txt
+        run: ./ci/write_version.sh
+
+      - name: Build Roc with SBF support
+        run: |
+          RUSTFLAGS="-C target-cpu=x86-64" cargo build \
+            --profile=release-with-lto \
+            --locked \
+            --features target-bpf \
+            --bin roc \
+            --bin roc_language_server
+
+      - name: Strip binaries
+        run: |
+          strip ./target/release-with-lto/roc
+          strip ./target/release-with-lto/roc_language_server
+
+      - name: Get version info
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ] && [ "${{ github.event.inputs.version }}" != "nightly" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=nightly-$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+
+      - name: Package release
+        run: |
+          RELEASE_NAME="roc-sbf-linux-x86_64-${{ env.VERSION }}"
+          mkdir -p $RELEASE_NAME/lib
+          
+          cp ./target/release-with-lto/roc $RELEASE_NAME/
+          cp ./target/release-with-lto/roc_language_server $RELEASE_NAME/
+          cp -r ./target/release-with-lto/lib/* $RELEASE_NAME/lib/ 2>/dev/null || true
+          cp LICENSE $RELEASE_NAME/
+          cp version.txt $RELEASE_NAME/
+          
+          mkdir -p $RELEASE_NAME/builtins
+          cp -r crates/compiler/builtins/bitcode/src/* $RELEASE_NAME/builtins/
+          
+          tar -czvf "${RELEASE_NAME}.tar.gz" $RELEASE_NAME
+          sha256sum "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc-sbf-linux-x86_64
+          path: |
+            roc-sbf-linux-x86_64-*.tar.gz
+            roc-sbf-linux-x86_64-*.tar.gz.sha256
+          retention-days: 7
+
+  build-linux-arm64:
+    name: Build Linux ARM64
+    runs-on: ubuntu-22.04
+    timeout-minutes: 150
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build in ARM64 container
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
+          githubToken: ${{ github.token }}
+          install: |
+            apt-get update
+            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2
+            wget https://apt.llvm.org/llvm.sh
+            chmod +x llvm.sh
+            ./llvm.sh 18
+            apt-get install -y llvm-18-dev libpolly-18-dev liblld-18-dev libclang-18-dev
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+            SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-v1.52.0"
+            wget "${SOLANA_ZIG_URL}/zig-aarch64-linux-musl.tar.bz2"
+            tar -xjf zig-aarch64-linux-musl.tar.bz2
+            mv zig-aarch64-linux-musl-baseline /opt/solana-zig
+          env: |
+            LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
+          run: |
+            export PATH="/opt/solana-zig:$HOME/.cargo/bin:$PATH"
+            export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
+            zig version
+            ./ci/write_version.sh
+            cargo build --profile=release-with-lto --locked --features target-bpf --bin roc --bin roc_language_server
+            strip ./target/release-with-lto/roc
+            strip ./target/release-with-lto/roc_language_server
+
+      - name: Get version info
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ] && [ "${{ github.event.inputs.version }}" != "nightly" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=nightly-$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+
+      - name: Package release
+        run: |
+          RELEASE_NAME="roc-sbf-linux-aarch64-${{ env.VERSION }}"
+          mkdir -p $RELEASE_NAME/lib
+          
+          cp ./target/release-with-lto/roc $RELEASE_NAME/
+          cp ./target/release-with-lto/roc_language_server $RELEASE_NAME/
+          cp -r ./target/release-with-lto/lib/* $RELEASE_NAME/lib/ 2>/dev/null || true
+          cp LICENSE $RELEASE_NAME/
+          cp version.txt $RELEASE_NAME/
+          
+          mkdir -p $RELEASE_NAME/builtins
+          cp -r crates/compiler/builtins/bitcode/src/* $RELEASE_NAME/builtins/
+          
+          tar -czvf "${RELEASE_NAME}.tar.gz" $RELEASE_NAME
+          sha256sum "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc-sbf-linux-aarch64
+          path: |
+            roc-sbf-linux-aarch64-*.tar.gz
+            roc-sbf-linux-aarch64-*.tar.gz.sha256
+          retention-days: 7
+
+  build-macos-x86_64:
+    name: Build macOS x86_64
+    runs-on: macos-13
+    timeout-minutes: 120
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          brew install llvm@18
+          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
+
+      - name: Install solana-zig
+        run: |
+          SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-${{ env.SOLANA_ZIG_VERSION }}"
+          curl -LO "${SOLANA_ZIG_URL}/zig-x86_64-macos-none.tar.bz2"
+          tar -xjf zig-x86_64-macos-none.tar.bz2
+          mv zig-x86_64-macos-none-baseline solana-zig
+          echo "$PWD/solana-zig" >> $GITHUB_PATH
+          ./solana-zig/zig version
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Create version.txt
+        run: ./ci/write_version.sh
+
+      - name: Build Roc with SBF support
+        run: |
+          cargo build \
+            --profile=release-with-lto \
+            --locked \
+            --features target-bpf \
+            --bin roc \
+            --bin roc_language_server
+
+      - name: Strip binaries
+        run: |
+          strip ./target/release-with-lto/roc
+          strip ./target/release-with-lto/roc_language_server
+
+      - name: Get version info
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ] && [ "${{ github.event.inputs.version }}" != "nightly" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=nightly-$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+
+      - name: Package release
+        run: |
+          RELEASE_NAME="roc-sbf-macos-x86_64-${{ env.VERSION }}"
+          mkdir -p $RELEASE_NAME/lib
+          
+          cp ./target/release-with-lto/roc $RELEASE_NAME/
+          cp ./target/release-with-lto/roc_language_server $RELEASE_NAME/
+          cp -r ./target/release-with-lto/lib/* $RELEASE_NAME/lib/ 2>/dev/null || true
+          cp LICENSE $RELEASE_NAME/
+          cp version.txt $RELEASE_NAME/
+          
+          mkdir -p $RELEASE_NAME/builtins
+          cp -r crates/compiler/builtins/bitcode/src/* $RELEASE_NAME/builtins/
+          
+          tar -czvf "${RELEASE_NAME}.tar.gz" $RELEASE_NAME
+          shasum -a 256 "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc-sbf-macos-x86_64
+          path: |
+            roc-sbf-macos-x86_64-*.tar.gz
+            roc-sbf-macos-x86_64-*.tar.gz.sha256
+          retention-days: 7
+
+  build-macos-arm64:
+    name: Build macOS ARM64
+    runs-on: macos-14
+    timeout-minutes: 120
+    
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LLVM 18
+        run: |
+          brew install llvm@18
+          echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
+
+      - name: Install solana-zig
+        run: |
+          SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-${{ env.SOLANA_ZIG_VERSION }}"
+          curl -LO "${SOLANA_ZIG_URL}/zig-aarch64-macos-none.tar.bz2"
+          tar -xjf zig-aarch64-macos-none.tar.bz2
+          mv zig-aarch64-macos-none-baseline solana-zig
+          echo "$PWD/solana-zig" >> $GITHUB_PATH
+          ./solana-zig/zig version
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Create version.txt
+        run: ./ci/write_version.sh
+
+      - name: Build Roc with SBF support
+        run: |
+          cargo build \
+            --profile=release-with-lto \
+            --locked \
+            --features target-bpf \
+            --bin roc \
+            --bin roc_language_server
+
+      - name: Strip binaries
+        run: |
+          strip ./target/release-with-lto/roc
+          strip ./target/release-with-lto/roc_language_server
+
+      - name: Get version info
+        run: |
+          if [ "${{ github.event.inputs.version }}" != "" ] && [ "${{ github.event.inputs.version }}" != "nightly" ]; then
+            echo "VERSION=${{ github.event.inputs.version }}" >> $GITHUB_ENV
+          elif [ "${GITHUB_REF#refs/tags/}" != "${GITHUB_REF}" ]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_ENV
+          else
+            echo "VERSION=nightly-$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          fi
+
+      - name: Package release
+        run: |
+          RELEASE_NAME="roc-sbf-macos-aarch64-${{ env.VERSION }}"
+          mkdir -p $RELEASE_NAME/lib
+          
+          cp ./target/release-with-lto/roc $RELEASE_NAME/
+          cp ./target/release-with-lto/roc_language_server $RELEASE_NAME/
+          cp -r ./target/release-with-lto/lib/* $RELEASE_NAME/lib/ 2>/dev/null || true
+          cp LICENSE $RELEASE_NAME/
+          cp version.txt $RELEASE_NAME/
+          
+          mkdir -p $RELEASE_NAME/builtins
+          cp -r crates/compiler/builtins/bitcode/src/* $RELEASE_NAME/builtins/
+          
+          tar -czvf "${RELEASE_NAME}.tar.gz" $RELEASE_NAME
+          shasum -a 256 "${RELEASE_NAME}.tar.gz" > "${RELEASE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: roc-sbf-macos-aarch64
+          path: |
+            roc-sbf-macos-aarch64-*.tar.gz
+            roc-sbf-macos-aarch64-*.tar.gz.sha256
+          retention-days: 7
+
+  create-release:
+    name: Create GitHub Release
+    needs: [build-linux-x86_64, build-linux-arm64, build-macos-x86_64, build-macos-arm64]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/sbf-v')
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          
+      - name: Flatten artifacts
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.sha256" \) -exec cp {} release/ \;
+          ls -la release/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          name: Roc SBF ${{ github.ref_name }}
+          body: |
+            ## Roc Compiler with Solana SBF Support
+            
+            This release includes the Roc compiler built with the `target-bpf` feature,
+            enabling compilation to Solana's SBF (Solana BPF) target.
+            
+            **Built with solana-zig ${{ env.SOLANA_ZIG_VERSION }}**
+            
+            ### Installation
+            
+            Use the install script:
+            ```bash
+            curl -sSfL https://raw.githubusercontent.com/DaviRain-Su/roc/main/install-roc-sbf.sh | bash
+            ```
+            
+            Or download manually and extract:
+            ```bash
+            # Linux x86_64
+            tar -xzf roc-sbf-linux-x86_64-${{ github.ref_name }}.tar.gz
+            
+            # macOS ARM64 (M1/M2)
+            tar -xzf roc-sbf-macos-aarch64-${{ github.ref_name }}.tar.gz
+            ```
+            
+            ### Usage
+            
+            ```bash
+            ./roc build --target sbf your_program.roc
+            ```
+            
+            ### Checksums
+            
+            See the `.sha256` files for archive checksums.
+          files: release/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, 'nightly') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

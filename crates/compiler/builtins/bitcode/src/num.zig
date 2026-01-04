@@ -2,8 +2,9 @@ const std = @import("std");
 const math = std.math;
 const RocList = @import("list.zig").RocList;
 const RocStr = @import("str.zig").RocStr;
-const WithOverflow = @import("utils.zig").WithOverflow;
-const Ordering = @import("utils.zig").Ordering;
+const utils = @import("utils.zig");
+const WithOverflow = utils.WithOverflow;
+const Ordering = utils.Ordering;
 const roc_panic = @import("panic.zig").panic_help;
 
 pub fn NumParseResult(comptime T: type) type {
@@ -66,54 +67,254 @@ pub fn mul_u128(a: u128, b: u128) U256 {
     return .{ .hi = hi, .lo = lo };
 }
 
-pub fn exportParseInt(comptime T: type, comptime name: []const u8) void {
-    const f = struct {
-        fn func(buf: RocStr) callconv(.C) NumParseResult(T) {
-            // a radix of 0 will make zig determine the radix from the frefix:
-            //  * A prefix of "0b" implies radix=2,
-            //  * A prefix of "0o" implies radix=8,
-            //  * A prefix of "0x" implies radix=16,
-            //  * Otherwise radix=10 is assumed.
-            const radix = 0;
-            if (std.fmt.parseInt(T, buf.asSlice(), radix)) |success| {
-                return .{ .errorcode = 0, .value = success };
-            } else |_| {
-                return .{ .errorcode = 1, .value = 0 };
-            }
+// Only define exportParseInt for non-SBF targets to avoid pulling in std.fmt
+// which contains Writer code with variable-size inline intrinsics
+pub const exportParseInt = if (utils.is_solana)
+    struct {
+        pub fn placeholder(comptime T: type, comptime name: []const u8) void {
+            _ = T;
+            _ = name;
+            @compileError("exportParseInt should not be called for SBF");
+        }
+    }.placeholder
+else
+    struct {
+        pub fn func(comptime T: type, comptime name: []const u8) void {
+            const f = struct {
+                fn func(buf: RocStr) callconv(utils.cc) NumParseResult(T) {
+                    // a radix of 0 will make zig determine the radix from the frefix:
+                    //  * A prefix of "0b" implies radix=2,
+                    //  * A prefix of "0o" implies radix=8,
+                    //  * A prefix of "0x" implies radix=16,
+                    //  * Otherwise radix=10 is assumed.
+                    const radix = 0;
+                    if (std.fmt.parseInt(T, buf.asSlice(), radix)) |success| {
+                        return .{ .errorcode = 0, .value = success };
+                    } else |_| {
+                        return .{ .errorcode = 1, .value = 0 };
+                    }
+                }
+            }.func;
+            @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+
+// Only define exportParseFloat for non-SBF targets
+pub const exportParseFloat = if (utils.is_solana)
+    struct {
+        pub fn placeholder(comptime T: type, comptime name: []const u8) void {
+            _ = T;
+            _ = name;
+            @compileError("exportParseFloat should not be called for SBF");
+        }
+    }.placeholder
+else
+    struct {
+        pub fn func(comptime T: type, comptime name: []const u8) void {
+            const f = struct {
+                fn func(buf: RocStr) callconv(utils.cc) NumParseResult(T) {
+                    if (std.fmt.parseFloat(T, buf.asSlice())) |success| {
+                        return .{ .errorcode = 0, .value = success };
+                    } else |_| {
+                        return .{ .errorcode = 1, .value = 0 };
+                    }
+                }
+            }.func;
+            @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+        }
+    }.func;
+
+// Simple parseInt implementation for SBF that avoids std.fmt (which pulls in Writer with inline intrinsics)
+pub fn exportParseIntSbf(comptime T: type, comptime name: []const u8) void {
+    const f = struct {
+        fn func(buf: RocStr) callconv(utils.cc) NumParseResult(T) {
+            const slice = buf.asSlice();
+            if (slice.len == 0) {
+                return .{ .errorcode = 1, .value = 0 };
+            }
+
+            var idx: usize = 0;
+            var negative = false;
+            var radix: u8 = 10;
+
+            // Handle sign
+            if (slice[idx] == '-') {
+                negative = true;
+                idx += 1;
+            } else if (slice[idx] == '+') {
+                idx += 1;
+            }
+
+            if (idx >= slice.len) {
+                return .{ .errorcode = 1, .value = 0 };
+            }
+
+            // Detect radix prefix
+            if (slice.len > idx + 1 and slice[idx] == '0') {
+                switch (slice[idx + 1]) {
+                    'b', 'B' => {
+                        radix = 2;
+                        idx += 2;
+                    },
+                    'o', 'O' => {
+                        radix = 8;
+                        idx += 2;
+                    },
+                    'x', 'X' => {
+                        radix = 16;
+                        idx += 2;
+                    },
+                    else => {},
+                }
+            }
+
+            if (idx >= slice.len) {
+                return .{ .errorcode = 1, .value = 0 };
+            }
+
+            const is_signed = @typeInfo(T).int.signedness == .signed;
+            var result: T = 0;
+
+            while (idx < slice.len) : (idx += 1) {
+                const c = slice[idx];
+                const digit: u8 = if (c >= '0' and c <= '9')
+                    c - '0'
+                else if (c >= 'a' and c <= 'f')
+                    c - 'a' + 10
+                else if (c >= 'A' and c <= 'F')
+                    c - 'A' + 10
+                else
+                    return .{ .errorcode = 1, .value = 0 };
+
+                if (digit >= radix) {
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+
+                // Check for overflow - use intCast which will fail at comptime if radix > max(T)
+                // but radix is always 2, 8, 10, or 16 which fits in any integer type we support
+                const mul_result = @mulWithOverflow(result, @as(T, @intCast(radix)));
+                if (mul_result[1] == 1) {
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+                const add_result = @addWithOverflow(mul_result[0], @as(T, @intCast(digit)));
+                if (add_result[1] == 1) {
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+                result = add_result[0];
+            }
+
+            if (negative) {
+                if (is_signed) {
+                    const neg_result = @subWithOverflow(@as(T, 0), result);
+                    if (neg_result[1] == 1) {
+                        return .{ .errorcode = 1, .value = 0 };
+                    }
+                    return .{ .errorcode = 0, .value = neg_result[0] };
+                } else {
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+            }
+
+            return .{ .errorcode = 0, .value = result };
+        }
+    }.func;
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
-pub fn exportParseFloat(comptime T: type, comptime name: []const u8) void {
+// Simple parseFloat implementation for SBF that avoids std.fmt
+// This is a very basic implementation - for Solana programs, float parsing is rarely needed
+pub fn exportParseFloatSbf(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(buf: RocStr) callconv(.C) NumParseResult(T) {
-            if (std.fmt.parseFloat(T, buf.asSlice())) |success| {
-                return .{ .errorcode = 0, .value = success };
-            } else |_| {
+        fn func(buf: RocStr) callconv(utils.cc) NumParseResult(T) {
+            const slice = buf.asSlice();
+            if (slice.len == 0) {
                 return .{ .errorcode = 1, .value = 0 };
             }
+
+            var idx: usize = 0;
+            var negative = false;
+
+            // Handle sign
+            if (slice[idx] == '-') {
+                negative = true;
+                idx += 1;
+            } else if (slice[idx] == '+') {
+                idx += 1;
+            }
+
+            if (idx >= slice.len) {
+                return .{ .errorcode = 1, .value = 0 };
+            }
+
+            var integer_part: i64 = 0;
+            var fraction_part: i64 = 0;
+            var fraction_digits: u32 = 0;
+            var in_fraction = false;
+
+            while (idx < slice.len) : (idx += 1) {
+                const c = slice[idx];
+                if (c == '.') {
+                    if (in_fraction) {
+                        return .{ .errorcode = 1, .value = 0 };
+                    }
+                    in_fraction = true;
+                    continue;
+                }
+                if (c == 'e' or c == 'E') {
+                    // Exponent not supported in simple implementation
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+                if (c < '0' or c > '9') {
+                    return .{ .errorcode = 1, .value = 0 };
+                }
+                const digit: i64 = c - '0';
+                if (in_fraction) {
+                    if (fraction_digits < 18) { // Limit precision
+                        fraction_part = fraction_part * 10 + digit;
+                        fraction_digits += 1;
+                    }
+                } else {
+                    integer_part = integer_part * 10 + digit;
+                }
+            }
+
+            var result: T = @floatFromInt(integer_part);
+
+            if (fraction_digits > 0) {
+                var divisor: T = 1.0;
+                var i: u32 = 0;
+                while (i < fraction_digits) : (i += 1) {
+                    divisor *= 10.0;
+                }
+                result += @as(T, @floatFromInt(fraction_part)) / divisor;
+            }
+
+            if (negative) {
+                result = -result;
+            }
+
+            return .{ .errorcode = 0, .value = result };
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportNumToFloatCast(comptime T: type, comptime F: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(x: T) callconv(.C) F {
+        fn func(x: T) callconv(utils.cc) F {
             return @floatFromInt(x);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportPow(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(base: T, exp: T) callconv(.C) T {
+        fn func(base: T, exp: T) callconv(utils.cc) T {
             switch (@typeInfo(T)) {
                 // std.math.pow can handle ints via powi, but it turns any errors to unreachable
                 // we want to catch overflow and report a proper error to the user
-                .Int => {
+                .int => {
                     if (std.math.powi(T, base, exp)) |value| {
                         return value;
                     } else |err| switch (err) {
@@ -127,153 +328,153 @@ pub fn exportPow(comptime T: type, comptime name: []const u8) void {
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportIsNan(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) bool {
+        fn func(input: T) callconv(utils.cc) bool {
             return std.math.isNan(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportIsInfinite(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) bool {
+        fn func(input: T) callconv(utils.cc) bool {
             return std.math.isInf(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportIsFinite(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) bool {
+        fn func(input: T) callconv(utils.cc) bool {
             return std.math.isFinite(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAsin(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return std.math.asin(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAcos(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return std.math.acos(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAtan(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return std.math.atan(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportSin(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return math.sin(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportCos(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return math.cos(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportTan(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return math.tan(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportLog(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return @log(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportFAbs(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return @abs(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportSqrt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: T) callconv(.C) T {
+        fn func(input: T) callconv(utils.cc) T {
             return math.sqrt(input);
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportRound(comptime F: type, comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: F) callconv(.C) T {
+        fn func(input: F) callconv(utils.cc) T {
             return @as(T, @intFromFloat((math.round(input))));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportFloor(comptime F: type, comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: F) callconv(.C) T {
+        fn func(input: F) callconv(utils.cc) T {
             return @as(T, @intFromFloat((math.floor(input))));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportCeiling(comptime F: type, comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: F) callconv(.C) T {
+        fn func(input: F) callconv(utils.cc) T {
             return @as(T, @intFromFloat((math.ceil(input))));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportDivCeil(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(a: T, b: T) callconv(.C) T {
+        fn func(a: T, b: T) callconv(utils.cc) T {
             return math.divCeil(T, a, b) catch {
                 roc_panic("Integer division by 0!", 0);
             };
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn ToIntCheckedResult(comptime T: type) type {
@@ -287,26 +488,26 @@ pub fn ToIntCheckedResult(comptime T: type) type {
 
 pub fn exportToIntCheckingMax(comptime From: type, comptime To: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: From) callconv(.C) ToIntCheckedResult(To) {
+        fn func(input: From) callconv(utils.cc) ToIntCheckedResult(To) {
             if (input > std.math.maxInt(To)) {
                 return .{ .out_of_bounds = true, .value = 0 };
             }
             return .{ .out_of_bounds = false, .value = @as(To, @intCast(input)) };
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(From), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(From), .linkage = .strong });
 }
 
 pub fn exportToIntCheckingMaxAndMin(comptime From: type, comptime To: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(input: From) callconv(.C) ToIntCheckedResult(To) {
+        fn func(input: From) callconv(utils.cc) ToIntCheckedResult(To) {
             if (input > std.math.maxInt(To) or input < std.math.minInt(To)) {
                 return .{ .out_of_bounds = true, .value = 0 };
             }
             return .{ .out_of_bounds = false, .value = @as(To, @intCast(input)) };
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(From), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(From), .linkage = .strong });
 }
 
 fn isMultipleOf(comptime T: type, lhs: T, rhs: T) bool {
@@ -326,16 +527,16 @@ fn isMultipleOf(comptime T: type, lhs: T, rhs: T) bool {
 
 pub fn exportIsMultipleOf(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) bool {
+        fn func(self: T, other: T) callconv(utils.cc) bool {
             return @call(.always_inline, isMultipleOf, .{ T, self, other });
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 fn addWithOverflow(comptime T: type, self: T, other: T) WithOverflow(T) {
     switch (@typeInfo(T)) {
-        .Int => {
+        .int => {
             const answer = @addWithOverflow(self, other);
             return .{ .value = answer[0], .has_overflowed = answer[1] == 1 };
         },
@@ -349,20 +550,20 @@ fn addWithOverflow(comptime T: type, self: T, other: T) WithOverflow(T) {
 
 pub fn exportAddWithOverflow(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) WithOverflow(T) {
+        fn func(self: T, other: T) callconv(utils.cc) WithOverflow(T) {
             return @call(.always_inline, addWithOverflow, .{ T, self, other });
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAddSaturatedInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = addWithOverflow(T, self, other);
             if (result.has_overflowed) {
                 // We can unambiguously tell which way it wrapped, because we have N+1 bits including the overflow bit
-                if (result.value >= 0 and @typeInfo(T).Int.signedness == .signed) {
+                if (result.value >= 0 and @typeInfo(T).int.signedness == .signed) {
                     return std.math.minInt(T);
                 } else {
                     return std.math.maxInt(T);
@@ -372,21 +573,21 @@ pub fn exportAddSaturatedInt(comptime T: type, comptime name: []const u8) void {
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAddWrappedInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             return self +% other;
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportAddOrPanic(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = addWithOverflow(T, self, other);
             if (result.has_overflowed) {
                 roc_panic("Integer addition overflowed!", 0);
@@ -395,12 +596,12 @@ pub fn exportAddOrPanic(comptime T: type, comptime name: []const u8) void {
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 fn subWithOverflow(comptime T: type, self: T, other: T) WithOverflow(T) {
     switch (@typeInfo(T)) {
-        .Int => {
+        .int => {
             const answer = @subWithOverflow(self, other);
             return .{ .value = answer[0], .has_overflowed = answer[1] == 1 };
         },
@@ -414,19 +615,19 @@ fn subWithOverflow(comptime T: type, self: T, other: T) WithOverflow(T) {
 
 pub fn exportSubWithOverflow(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) WithOverflow(T) {
+        fn func(self: T, other: T) callconv(utils.cc) WithOverflow(T) {
             return @call(.always_inline, subWithOverflow, .{ T, self, other });
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportSubSaturatedInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = subWithOverflow(T, self, other);
             if (result.has_overflowed) {
-                if (@typeInfo(T).Int.signedness == .unsigned) {
+                if (@typeInfo(T).int.signedness == .unsigned) {
                     return 0;
                 } else if (self < 0) {
                     return std.math.minInt(T);
@@ -438,21 +639,21 @@ pub fn exportSubSaturatedInt(comptime T: type, comptime name: []const u8) void {
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportSubWrappedInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             return self -% other;
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportSubOrPanic(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = subWithOverflow(T, self, other);
             if (result.has_overflowed) {
                 roc_panic("Integer subtraction overflowed!", 0);
@@ -461,12 +662,12 @@ pub fn exportSubOrPanic(comptime T: type, comptime name: []const u8) void {
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 fn mulWithOverflow(comptime T: type, comptime W: type, self: T, other: T) WithOverflow(T) {
     switch (@typeInfo(T)) {
-        .Int => {
+        .int => {
             if (T == i128) {
                 const is_answer_negative = (self < 0) != (other < 0);
                 const max = std.math.maxInt(i128);
@@ -542,33 +743,33 @@ fn mulWithOverflow(comptime T: type, comptime W: type, self: T, other: T) WithOv
 
 pub fn exportMulWithOverflow(comptime T: type, comptime W: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) WithOverflow(T) {
+        fn func(self: T, other: T) callconv(utils.cc) WithOverflow(T) {
             return @call(.always_inline, mulWithOverflow, .{ T, W, self, other });
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportMulSaturatedInt(comptime T: type, comptime W: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = @call(.always_inline, mulWithOverflow, .{ T, W, self, other });
             return result.value;
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportMulWrappedInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             return self *% other;
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
-pub fn shiftRightZeroFillI128(self: i128, other: u8) callconv(.C) i128 {
+pub fn shiftRightZeroFillI128(self: i128, other: u8) callconv(utils.cc) i128 {
     if (other & 0b1000_0000 > 0) {
         return 0;
     } else {
@@ -576,7 +777,7 @@ pub fn shiftRightZeroFillI128(self: i128, other: u8) callconv(.C) i128 {
     }
 }
 
-pub fn shiftRightZeroFillU128(self: u128, other: u8) callconv(.C) u128 {
+pub fn shiftRightZeroFillU128(self: u128, other: u8) callconv(utils.cc) u128 {
     if (other & 0b1000_0000 > 0) {
         return 0;
     } else {
@@ -584,7 +785,7 @@ pub fn shiftRightZeroFillU128(self: u128, other: u8) callconv(.C) u128 {
     }
 }
 
-pub fn compareI128(self: i128, other: i128) callconv(.C) Ordering {
+pub fn compareI128(self: i128, other: i128) callconv(utils.cc) Ordering {
     if (self == other) {
         return Ordering.EQ;
     } else if (self < other) {
@@ -594,7 +795,7 @@ pub fn compareI128(self: i128, other: i128) callconv(.C) Ordering {
     }
 }
 
-pub fn compareU128(self: u128, other: u128) callconv(.C) Ordering {
+pub fn compareU128(self: u128, other: u128) callconv(utils.cc) Ordering {
     if (self == other) {
         return Ordering.EQ;
     } else if (self < other) {
@@ -604,41 +805,41 @@ pub fn compareU128(self: u128, other: u128) callconv(.C) Ordering {
     }
 }
 
-pub fn lessThanI128(self: i128, other: i128) callconv(.C) bool {
+pub fn lessThanI128(self: i128, other: i128) callconv(utils.cc) bool {
     return self < other;
 }
 
-pub fn lessThanOrEqualI128(self: i128, other: i128) callconv(.C) bool {
+pub fn lessThanOrEqualI128(self: i128, other: i128) callconv(utils.cc) bool {
     return self <= other;
 }
 
-pub fn greaterThanI128(self: i128, other: i128) callconv(.C) bool {
+pub fn greaterThanI128(self: i128, other: i128) callconv(utils.cc) bool {
     return self > other;
 }
 
-pub fn greaterThanOrEqualI128(self: i128, other: i128) callconv(.C) bool {
+pub fn greaterThanOrEqualI128(self: i128, other: i128) callconv(utils.cc) bool {
     return self >= other;
 }
 
-pub fn lessThanU128(self: u128, other: u128) callconv(.C) bool {
+pub fn lessThanU128(self: u128, other: u128) callconv(utils.cc) bool {
     return self < other;
 }
 
-pub fn lessThanOrEqualU128(self: u128, other: u128) callconv(.C) bool {
+pub fn lessThanOrEqualU128(self: u128, other: u128) callconv(utils.cc) bool {
     return self <= other;
 }
 
-pub fn greaterThanU128(self: u128, other: u128) callconv(.C) bool {
+pub fn greaterThanU128(self: u128, other: u128) callconv(utils.cc) bool {
     return self > other;
 }
 
-pub fn greaterThanOrEqualU128(self: u128, other: u128) callconv(.C) bool {
+pub fn greaterThanOrEqualU128(self: u128, other: u128) callconv(utils.cc) bool {
     return self >= other;
 }
 
 pub fn exportMulOrPanic(comptime T: type, comptime W: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T, other: T) callconv(.C) T {
+        fn func(self: T, other: T) callconv(utils.cc) T {
             const result = @call(.always_inline, mulWithOverflow, .{ T, W, self, other });
             if (result.has_overflowed) {
                 roc_panic("Integer multiplication overflowed!", 0);
@@ -647,37 +848,37 @@ pub fn exportMulOrPanic(comptime T: type, comptime W: type, comptime name: []con
             }
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportCountLeadingZeroBits(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T) callconv(.C) u8 {
+        fn func(self: T) callconv(utils.cc) u8 {
             return @as(u8, @clz(self));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportCountTrailingZeroBits(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T) callconv(.C) u8 {
+        fn func(self: T) callconv(utils.cc) u8 {
             return @as(u8, @ctz(self));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 pub fn exportCountOneBits(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(self: T) callconv(.C) u8 {
+        fn func(self: T) callconv(utils.cc) u8 {
             return @as(u8, @popCount(self));
         }
     }.func;
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
-pub fn f32ToParts(self: f32) callconv(.C) F32Parts {
+pub fn f32ToParts(self: f32) callconv(utils.cc) F32Parts {
     const u32Value = @as(u32, @bitCast(self));
     return F32Parts{
         .fraction = u32Value & 0x7fffff,
@@ -686,7 +887,7 @@ pub fn f32ToParts(self: f32) callconv(.C) F32Parts {
     };
 }
 
-pub fn f64ToParts(self: f64) callconv(.C) F64Parts {
+pub fn f64ToParts(self: f64) callconv(utils.cc) F64Parts {
     const u64Value = @as(u64, @bitCast(self));
     return F64Parts{
         .fraction = u64Value & 0xfffffffffffff,
@@ -695,34 +896,34 @@ pub fn f64ToParts(self: f64) callconv(.C) F64Parts {
     };
 }
 
-pub fn f32FromParts(parts: F32Parts) callconv(.C) f32 {
+pub fn f32FromParts(parts: F32Parts) callconv(utils.cc) f32 {
     return @as(f32, @bitCast(parts.fraction & 0x7fffff | (@as(u32, parts.exponent) << 23) | (@as(u32, @intFromBool(parts.sign)) << 31)));
 }
 
-pub fn f64FromParts(parts: F64Parts) callconv(.C) f64 {
+pub fn f64FromParts(parts: F64Parts) callconv(utils.cc) f64 {
     return @as(f64, @bitCast(parts.fraction & 0xfffffffffffff | (@as(u64, parts.exponent & 0x7ff) << 52) | (@as(u64, @intFromBool(parts.sign)) << 63)));
 }
 
-pub fn f32ToBits(self: f32) callconv(.C) u32 {
+pub fn f32ToBits(self: f32) callconv(utils.cc) u32 {
     return @as(u32, @bitCast(self));
 }
 
-pub fn f64ToBits(self: f64) callconv(.C) u64 {
+pub fn f64ToBits(self: f64) callconv(utils.cc) u64 {
     return @as(u64, @bitCast(self));
 }
 
-pub fn i128ToBits(self: i128) callconv(.C) u128 {
+pub fn i128ToBits(self: i128) callconv(utils.cc) u128 {
     return @as(u128, @bitCast(self));
 }
 
-pub fn f32FromBits(bits: u32) callconv(.C) f32 {
+pub fn f32FromBits(bits: u32) callconv(utils.cc) f32 {
     return @as(f32, @bitCast(bits));
 }
 
-pub fn f64FromBits(bits: u64) callconv(.C) f64 {
+pub fn f64FromBits(bits: u64) callconv(utils.cc) f64 {
     return @as(f64, @bitCast(bits));
 }
 
-pub fn i128FromBits(bits: u128) callconv(.C) i128 {
+pub fn i128FromBits(bits: u128) callconv(utils.cc) i128 {
     return @as(i128, @bitCast(bits));
 }

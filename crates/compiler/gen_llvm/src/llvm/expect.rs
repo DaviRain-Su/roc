@@ -22,6 +22,7 @@ use roc_region::all::Region;
 use super::build::BuilderExt;
 use super::build::{add_func, FunctionSpec, LlvmBackendMode};
 use super::convert::struct_type_from_union_layout;
+use super::memcpy::build_memcpy_raw;
 use super::scope::Scope;
 use super::struct_::RocStruct;
 
@@ -1016,7 +1017,7 @@ fn build_clone_builtin<'a, 'ctx>(
                     env.context.ptr_type(AddressSpace::default()),
                     "to_bytes_pointer",
                 );
-                bd.build_memcpy(dest, 1, src, 1, elements_width).unwrap();
+                build_memcpy_raw(env, dest, 1, src, 1, elements_width);
 
                 bd.new_build_int_add(elements_start_offset, elements_width, "new_offset")
             } else {

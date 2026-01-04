@@ -16,6 +16,7 @@ pub enum OperatingSystem {
     Linux,
     Mac,
     Windows,
+    Solana,
 }
 
 impl std::fmt::Display for OperatingSystem {
@@ -25,6 +26,7 @@ impl std::fmt::Display for OperatingSystem {
             OperatingSystem::Linux => "linux",
             OperatingSystem::Mac => "macos",
             OperatingSystem::Windows => "windows",
+            OperatingSystem::Solana => "solana",
         };
         write!(f, "{}", arch_str)
     }
@@ -44,6 +46,7 @@ pub enum Architecture {
     Wasm32,
     X86_32,
     X86_64,
+    Sbf,
 }
 
 impl std::fmt::Display for Architecture {
@@ -54,6 +57,7 @@ impl std::fmt::Display for Architecture {
             Architecture::Wasm32 => "wasm32",
             Architecture::X86_32 => "x86_32",
             Architecture::X86_64 => "x86_64",
+            Architecture::Sbf => "sbf",
         };
         write!(f, "{}", arch_str)
     }
@@ -64,7 +68,7 @@ impl Architecture {
         use Architecture::*;
 
         match self {
-            X86_64 | Aarch64 => PtrWidth::Bytes8,
+            X86_64 | Aarch64 | Sbf => PtrWidth::Bytes8,
             X86_32 | Aarch32 | Wasm32 => PtrWidth::Bytes4,
         }
     }
@@ -85,6 +89,7 @@ pub enum Target {
     WinX64,
     WinArm64,
     Wasm32,
+    Sbf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -101,6 +106,7 @@ impl Target {
             LinuxX64 | WinX64 | MacX64 => Architecture::X86_64,
             LinuxArm64 | WinArm64 | MacArm64 => Architecture::Aarch64,
             Wasm32 => Architecture::Wasm32,
+            Sbf => Architecture::Sbf,
         }
     }
 
@@ -111,6 +117,7 @@ impl Target {
             MacX64 | MacArm64 => OperatingSystem::Mac,
             WinX32 | WinX64 | WinArm64 => OperatingSystem::Windows,
             Wasm32 => OperatingSystem::Freestanding,
+            Sbf => OperatingSystem::Solana,
         }
     }
 
@@ -145,7 +152,7 @@ impl Target {
     pub const fn object_file_ext(&self) -> &str {
         use Target::*;
         match self {
-            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 => "o",
+            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Sbf => "o",
             WinX32 | WinX64 | WinArm64 => "obj",
             Wasm32 => "wasm",
         }
@@ -155,7 +162,7 @@ impl Target {
     pub const fn static_library_file_ext(&self) -> &str {
         use Target::*;
         match self {
-            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 => "a",
+            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Sbf => "a",
             WinX32 | WinX64 | WinArm64 => "lib",
             Wasm32 => "wasm",
         }
@@ -165,7 +172,7 @@ impl Target {
     pub const fn dynamic_library_file_ext(&self) -> &str {
         use Target::*;
         match self {
-            LinuxX32 | LinuxX64 | LinuxArm64 => "so",
+            LinuxX32 | LinuxX64 | LinuxArm64 | Sbf => "so",
             MacX64 | MacArm64 => "dylib",
             WinX32 | WinX64 | WinArm64 => "dll",
             Wasm32 => "wasm",
@@ -179,6 +186,7 @@ impl Target {
             LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 => None,
             WinX32 | WinX64 | WinArm64 => Some("exe"),
             Wasm32 => Some("wasm"),
+            Sbf => Some("so"),
         }
     }
 
@@ -187,7 +195,7 @@ impl Target {
     pub fn prebuilt_static_object(&self) -> String {
         use Target::*;
         match self {
-            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Wasm32 => {
+            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Wasm32 | Sbf => {
                 format!("{}.o", self)
             }
             WinX32 | WinX64 | WinArm64 => {
@@ -201,7 +209,7 @@ impl Target {
     pub fn prebuilt_static_library(&self) -> String {
         use Target::*;
         match self {
-            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Wasm32 => {
+            LinuxX32 | LinuxX64 | LinuxArm64 | MacX64 | MacArm64 | Wasm32 | Sbf => {
                 format!("{}.a", self)
             }
             WinX32 | WinX64 | WinArm64 => {
@@ -336,6 +344,7 @@ impl FromStr for Target {
             "windows-x64" => Ok(WinX64),
             "windows-arm64" => Ok(WinArm64),
             "wasm32" => Ok(Wasm32),
+            "sbf" | "solana" | "sbfsolana" => Ok(Sbf),
             _ => Err(ParseError::InvalidTargetString),
         }
     }
@@ -362,6 +371,7 @@ impl From<&Target> for &'static str {
             WinX64 => "windows-x64",
             WinArm64 => "windows-arm64",
             Wasm32 => "wasm32",
+            Sbf => "sbf",
         }
     }
 }
@@ -452,6 +462,7 @@ impl TryFrom<(Architecture, OperatingSystem)> for Target {
             (Architecture::X86_64, OperatingSystem::Mac) => Ok(Target::MacX64),
             (Architecture::Aarch64, OperatingSystem::Mac) => Ok(Target::MacArm64),
             (Architecture::Wasm32, _) => Ok(Target::Wasm32),
+            (Architecture::Sbf, _) => Ok(Target::Sbf),
             _ => Err(TargetFromTripleError::TripleUnsupported),
         }
     }

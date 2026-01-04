@@ -28,6 +28,7 @@ pub const TargetFormat = enum {
     coff,
     macho,
     wasm,
+    sbf, // Solana BPF format
 
     /// Automatically detect target format based on the current system
     pub fn detectFromSystem() TargetFormat {
@@ -35,6 +36,7 @@ pub const TargetFormat = enum {
             .windows => .coff,
             .macos, .ios, .watchos, .tvos => .macho,
             .freestanding => .wasm,
+            .solana => .sbf,
             else => .elf,
         };
     }
@@ -45,6 +47,7 @@ pub const TargetFormat = enum {
             .windows => .coff,
             .macos, .ios, .watchos, .tvos => .macho,
             .freestanding => .wasm,
+            .solana => .sbf,
             else => .elf,
         };
     }
@@ -324,6 +327,87 @@ fn buildLinkArgs(ctx: *CliContext, config: LinkConfig) LinkError!std.array_list.
             try args.append("-z");
             try args.append(stack_size_str);
         },
+        .solana => {
+            // Solana BPF/SBF linker (ld.lld for SBF target)
+            try args.append("ld.lld");
+
+            // Add output argument
+            try args.append("-o");
+            try args.append(config.output_path);
+
+            // Suppress LLD warnings
+            try args.append("-w");
+
+            // Allow undefined symbols (Solana syscalls are resolved at runtime by BPF loader)
+            try args.append("--unresolved-symbols=ignore-all");
+
+            // Disable garbage collection to preserve entrypoint
+            try args.append("--no-gc-sections");
+
+            // Generate shared library (Solana programs are .so files)
+            try args.append("-shared");
+
+            // Set entry point to entrypoint symbol
+            try args.append("-e");
+            try args.append("entrypoint");
+
+            // Enable relaxed relocations to allow non-PIC code in shared library
+            try args.append("-z");
+            try args.append("notext");
+
+            // Strip ALL symbols and debug info
+            try args.append("--strip-all");
+
+            // Discard all local symbols
+            try args.append("--discard-all");
+
+            // Create and use an inline linker script via --script
+            // This MUST be done to discard .eh_frame and .data sections
+            // Solana BPF programs cannot have writable data sections
+            // We write the linker script to a temporary file in the output directory
+            const output_dir = std.fs.path.dirname(config.output_path) orelse ".";
+            const linker_script_path = std.fs.path.join(ctx.arena, &.{ output_dir, "solana_bpf.ld" }) catch return LinkError.OutOfMemory;
+
+            // Write linker script to file
+            // CRITICAL: Solana BPF loader rejects any writable sections except .dynamic
+            // - .data must be discarded or merged into .rodata
+            // - .eh_frame causes non-PIC relocation errors and must be discarded
+            const linker_script_content =
+                \\PHDRS
+                \\{
+                \\text PT_LOAD ;
+                \\rodata PT_LOAD ;
+                \\dynamic PT_DYNAMIC ;
+                \\}
+                \\
+                \\SECTIONS
+                \\{
+                \\. = SIZEOF_HEADERS;
+                \\.text : { *(.text*) } :text
+                \\.rodata : { *(.rodata*) *(.data*) *(.bss*) } :rodata
+                \\.dynamic : { *(.dynamic) } :dynamic
+                \\.dynsym : { *(.dynsym) } :rodata
+                \\.dynstr : { *(.dynstr) } :rodata
+                \\.rel.dyn : { *(.rel.dyn) } :rodata
+                \\/DISCARD/ : {
+                \\*(.eh_frame*)
+                \\*(.gnu.hash*)
+                \\*(.hash*)
+                \\*(.comment*)
+                \\*(.note*)
+                \\}
+                \\}
+            ;
+
+            // Write the linker script to the file
+            const linker_script_file = std.fs.cwd().createFile(linker_script_path, .{}) catch return LinkError.OutOfMemory;
+            defer linker_script_file.close();
+            linker_script_file.writeAll(linker_script_content) catch return LinkError.OutOfMemory;
+
+            // Use the linker script
+            try args.append("-T");
+            try args.append(linker_script_path);
+        },
         else => {
             // Generic ELF linker
             try args.append("ld.lld");
@@ -337,12 +421,12 @@ fn buildLinkArgs(ctx: *CliContext, config: LinkConfig) LinkError!std.array_list.
         },
     }
 
-    // For WASM targets, wrap platform files in --whole-archive to include all symbols
-    // This ensures host exports (init, handleEvent, update) aren't stripped even when
-    // not referenced by other code
+    // For WASM and SBF targets, wrap platform files in --whole-archive to include all symbols
+    // This ensures host exports (init, handleEvent, update, entrypoint) aren't stripped
     const is_wasm = config.target_format == .wasm;
+    const is_sbf = config.target_format == .sbf;
     const is_macos = target_os == .macos;
-    if (is_wasm and config.platform_files_pre.len > 0) {
+    if ((is_wasm or is_sbf) and config.platform_files_pre.len > 0) {
         try args.append("--whole-archive");
     }
 
@@ -419,7 +503,7 @@ pub fn link(ctx: *CliContext, config: LinkConfig) LinkError!void {
 
     // Call appropriate LLD function based on target format
     const success = switch (config.target_format) {
-        .elf => llvm_externs.ZigLLDLinkELF(
+        .elf, .sbf => llvm_externs.ZigLLDLinkELF(
             @intCast(c_args.len),
             c_args.ptr,
             config.can_exit_early,

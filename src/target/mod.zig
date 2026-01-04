@@ -34,6 +34,9 @@ pub const RocTarget = enum {
     // WebAssembly
     wasm32,
 
+    // Solana BPF (SBF)
+    sbfsolana,
+
     /// Parse target from string (e.g., "arm64mac", "x64musl")
     pub fn fromString(str: []const u8) ?RocTarget {
         const enum_info = @typeInfo(RocTarget);
@@ -91,6 +94,7 @@ pub const RocTarget = enum {
                 }
             },
             .wasm32 => return .wasm32,
+            .sbf => return .sbfsolana,
             else => {
                 // Default fallback based on OS
                 switch (os) {
@@ -123,6 +127,7 @@ pub const RocTarget = enum {
             .x64netbsd => .netbsd,
             .x64musl, .x64glibc, .x64linux, .x64elf, .arm64musl, .arm64glibc, .arm64linux, .arm32musl, .arm32linux => .linux,
             .wasm32 => .freestanding,
+            .sbfsolana => .solana,
         };
     }
 
@@ -140,6 +145,9 @@ pub const RocTarget = enum {
 
             // WebAssembly
             .wasm32 => .wasm32,
+
+            // Solana BPF
+            .sbfsolana => .sbf,
         };
     }
 
@@ -170,6 +178,9 @@ pub const RocTarget = enum {
 
             // WebAssembly
             .wasm32 => "wasm32-unknown-unknown",
+
+            // Solana BPF
+            .sbfsolana => "sbf-solana-solana",
         };
     }
 
@@ -184,7 +195,7 @@ pub const RocTarget = enum {
     /// Check if target uses static linking (musl targets)
     pub fn isStatic(self: RocTarget) bool {
         return switch (self) {
-            .x64musl, .arm64musl, .arm32musl => true,
+            .x64musl, .arm64musl, .arm32musl, .sbfsolana => true,
             else => false,
         };
     }
@@ -216,18 +227,18 @@ pub const RocTarget = enum {
     /// Get the pointer bit width for this target
     pub fn ptrBitWidth(self: RocTarget) u16 {
         return switch (self.toCpuArch()) {
-            .x86_64, .aarch64, .aarch64_be => 64,
+            .x86_64, .aarch64, .aarch64_be, .sbf => 64,
             .arm, .wasm32 => 32,
             else => 64, // Default to 64-bit
         };
     }
 
     /// Check if this target can be built and run on the current host.
-    /// wasm32 is always compatible (cross-compilation to wasm works on any host).
+    /// wasm32 and sbfsolana are always compatible (cross-compilation works on any host).
     /// Native targets are compatible if both OS and architecture match the host.
     pub fn isCompatibleWithHost(self: RocTarget) bool {
-        // wasm32 can be built from any host
-        if (self == .wasm32) return true;
+        // wasm32 and sbfsolana can be built from any host
+        if (self == .wasm32 or self == .sbfsolana) return true;
 
         // Otherwise, check if both OS and architecture match
         return self.toOsTag() == builtin.target.os.tag and
@@ -265,6 +276,9 @@ pub const RocTarget = enum {
 
             // WebAssembly doesn't use dynamic linker
             .wasm32 => return error.WebAssemblyTarget,
+
+            // Solana BPF doesn't use dynamic linker
+            .sbfsolana => return error.SolanaBPFTarget,
         };
     }
 };

@@ -21,6 +21,8 @@ pub fn target_triple_str(target: Target) -> &'static str {
         Target::MacX64 => "x86_64-unknown-darwin10",
         Target::Wasm32 => "wasm32-unknown-unknown",
         Target::WinX64 => "x86_64-pc-windows-gnu",
+        // Solana BPF target - uses BPF little-endian
+        Target::Sbf => "bpfel-unknown-unknown",
         _ => internal_error!("TODO gracefully handle unsupported target: {:?}", target),
     }
 }
@@ -40,6 +42,9 @@ pub fn init_arch(target: Target) {
         }
         Architecture::Wasm32 if cfg!(feature = "target-wasm32") => {
             LlvmTarget::initialize_webassembly(&InitializationConfig::default());
+        }
+        Architecture::Sbf if cfg!(feature = "target-bpf") => {
+            LlvmTarget::initialize_bpf(&InitializationConfig::default());
         }
         _ => internal_error!(
             "TODO gracefully handle unsupported target architecture: {:?}",
@@ -61,6 +66,7 @@ pub fn arch_str(target: Target) -> &'static str {
         roc_target::Architecture::Aarch64 if cfg!(feature = "target-aarch64") => "aarch64",
         roc_target::Architecture::Aarch32 if cfg!(feature = "target-arm") => "arm",
         roc_target::Architecture::Wasm32 if cfg!(feature = "target-wasm32") => "wasm32",
+        roc_target::Architecture::Sbf if cfg!(feature = "target-bpf") => "bpfel",
         _ => internal_error!(
             "TODO gracefully handle unsupported target architecture: {:?}",
             target.architecture()

@@ -123,6 +123,8 @@ const LLVMCodeGenLevelAggressive: c_int = 3;
 
 // LLVM Relocation Models
 const LLVMRelocDefault: c_int = 0;
+const LLVMRelocStatic: c_int = 1;
+const LLVMRelocPIC: c_int = 2;
 
 // LLVM Code Models
 const LLVMCodeModelDefault: c_int = 0;
@@ -252,14 +254,20 @@ pub fn compileBitcodeToObject(gpa: Allocator, config: CompileConfig) !bool {
     const features_z = try gpa.dupeZ(u8, config.features);
     defer gpa.free(features_z);
 
-    std.log.debug("Creating target machine with CPU='{s}', Features='{s}'", .{ config.cpu, config.features });
+    // Use PIC relocation model for SBF/Solana targets (required for shared library)
+    const reloc_model = if (config.target == .sbfsolana)
+        LLVMRelocPIC
+    else
+        LLVMRelocDefault;
+
+    std.log.debug("Creating target machine with CPU='{s}', Features='{s}', Reloc={}", .{ config.cpu, config.features, reloc_model });
     const target_machine = externs.ZigLLVMCreateTargetMachine(
         llvm_target,
         target_triple_z.ptr,
         cpu_z.ptr,
         features_z.ptr,
         config.optimization.toLLVMLevel(),
-        LLVMRelocDefault,
+        reloc_model,
         LLVMCodeModelDefault,
         false, // function_sections
         false, // data_sections

@@ -22,6 +22,11 @@ const musl_cross_targets = [_]CrossTarget{
     .{ .name = "arm64musl", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl } },
 };
 
+/// Solana SBF cross-compile target (for Roc on Solana)
+const sbf_cross_targets = [_]CrossTarget{
+    .{ .name = "sbfsolana", .query = .{ .cpu_arch = .sbf, .os_tag = .solana, .abi = .none } },
+};
+
 /// Glibc cross-compile targets (dynamic linking)
 const glibc_cross_targets = [_]CrossTarget{
     .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
@@ -3070,6 +3075,7 @@ fn addMainExe(
         .{ .name = "x64glibc", .query = .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu } },
         .{ .name = "arm64glibc", .query = .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu } },
         .{ .name = "wasm32", .query = .{ .cpu_arch = .wasm32, .os_tag = .freestanding, .abi = .none } },
+        .{ .name = "sbfsolana", .query = .{ .cpu_arch = .sbf, .os_tag = .solana, .abi = .none } },
     };
 
     for (cross_compile_shim_targets) |cross_target| {
@@ -3089,11 +3095,18 @@ fn addMainExe(
         });
         configureBackend(cross_builtins_obj, cross_resolved_target);
 
+        // For SBF/Solana, use a minimal stub since programs run compiled, not interpreted
+        const is_sbf_target = cross_target.query.cpu_arch == .sbf and cross_target.query.os_tag == .solana;
+        const shim_source = if (is_sbf_target)
+            b.path("src/interpreter_shim/sbf_stub.zig")
+        else
+            b.path("src/interpreter_shim/main.zig");
+
         // Build interpreter shim library for this target
         const cross_shim_lib = b.addLibrary(.{
             .name = b.fmt("roc_interpreter_shim_{s}", .{cross_target.name}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/interpreter_shim/main.zig"),
+                .root_source_file = shim_source,
                 .target = cross_resolved_target,
                 .optimize = optimize,
                 .strip = strip,
@@ -3106,7 +3119,10 @@ fn addMainExe(
 
         // For wasm32, only add the modules needed by the interpreter shim
         // (compile, watch, lsp, repl, ipc use threading/file I/O not available on freestanding)
-        if (cross_target.query.cpu_arch == .wasm32 and cross_target.query.os_tag == .freestanding) {
+        // For SBF/Solana, we use a minimal stub that doesn't need any modules
+        if (is_sbf_target) {
+            // SBF stub doesn't need any modules - it's just a minimal stub
+        } else if (cross_target.query.cpu_arch == .wasm32 and cross_target.query.os_tag == .freestanding) {
             cross_shim_lib.root_module.addImport("base", roc_modules.base);
             cross_shim_lib.root_module.addImport("collections", roc_modules.collections);
             cross_shim_lib.root_module.addImport("types", roc_modules.types);
@@ -3124,9 +3140,13 @@ fn addMainExe(
         } else {
             roc_modules.addAll(cross_shim_lib);
         }
-        cross_shim_lib.root_module.addImport("compiled_builtins", compiled_builtins_module);
-        cross_shim_lib.step.dependOn(&write_compiled_builtins.step);
-        cross_shim_lib.addObject(cross_builtins_obj);
+
+        // Only add compiled_builtins and builtins object for non-SBF targets
+        if (!is_sbf_target) {
+            cross_shim_lib.root_module.addImport("compiled_builtins", compiled_builtins_module);
+            cross_shim_lib.step.dependOn(&write_compiled_builtins.step);
+            cross_shim_lib.addObject(cross_builtins_obj);
+        }
         cross_shim_lib.bundle_compiler_rt = true;
 
         // Copy to target-specific directory for embedding
@@ -3386,8 +3406,9 @@ fn addStaticLlvmOptionsToModule(mod: *std.Build.Module) !void {
     mod.linkSystemLibrary("z", link_static);
 
     if (mod.resolved_target.?.result.os.tag != .windows or mod.resolved_target.?.result.abi != .msvc) {
-        // Use Zig's bundled static libc++ to keep the binary statically linked
-        mod.link_libcpp = true;
+        // Link libstdc++ instead of libc++ for compatibility with Solana LLVM
+        // (Solana LLVM is compiled with GCC/libstdc++)
+        mod.linkSystemLibrary("stdc++", link_static);
     }
 
     if (mod.resolved_target.?.result.os.tag == .windows) {
@@ -3515,6 +3536,12 @@ const llvm_libs = [_][]const u8{
     "LLVMBPFCodeGen",
     "LLVMBPFDesc",
     "LLVMBPFInfo",
+    // SBF (Solana BPF) target support - added for Roc on Solana
+    "LLVMSBFDisassembler",
+    "LLVMSBFAsmParser",
+    "LLVMSBFCodeGen",
+    "LLVMSBFDesc",
+    "LLVMSBFInfo",
     "LLVMAVRDisassembler",
     "LLVMAVRAsmParser",
     "LLVMAVRCodeGen",

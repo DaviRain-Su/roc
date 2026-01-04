@@ -56,7 +56,7 @@ pub const RocStr = extern struct {
     // small string, and returns a (pointer, len) tuple which points to them.
     pub fn init(bytes_ptr: [*]const u8, length: usize) RocStr {
         var result = RocStr.allocate(length);
-        @memcpy(result.asU8ptrMut()[0..length], bytes_ptr[0..length]);
+        utils.memcpy(result.asU8ptrMut()[0..length], bytes_ptr[0..length]);
 
         return result;
     }
@@ -218,7 +218,7 @@ pub const RocStr = extern struct {
             var old_bytes: [*]u8 = @as([*]u8, @ptrCast(str.bytes));
             var new_bytes: [*]u8 = @as([*]u8, @ptrCast(new_str.bytes));
 
-            @memcpy(new_bytes[0..str.length], old_bytes[0..str.length]);
+            utils.memcpy(new_bytes[0..str.length], old_bytes[0..str.length]);
 
             return new_str;
         }
@@ -275,8 +275,8 @@ pub const RocStr = extern struct {
             const source_ptr = self.asU8ptr();
             const dest_ptr = result.asU8ptrMut();
 
-            @memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
-            @memset(dest_ptr[old_length..new_length], 0);
+            utils.memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
+            utils.memset(dest_ptr[old_length..new_length], 0);
 
             self.decref();
 
@@ -291,8 +291,8 @@ pub const RocStr = extern struct {
 
             const source_ptr = self.asU8ptr();
 
-            @memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
-            @memset(dest_ptr[old_length..new_length], 0);
+            utils.memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
+            utils.memset(dest_ptr[old_length..new_length], 0);
 
             self.decref();
 
@@ -421,7 +421,7 @@ pub const RocStr = extern struct {
     // a C function - like the file path argument to `fopen`.
     pub fn memcpy(self: RocStr, dest: [*]u8) void {
         const src = self.asU8ptr();
-        @memcpy(dest[0..self.len()], src[0..self.len()]);
+        utils.memcpy(dest[0..self.len()], src[0..self.len()]);
     }
 
     test "RocStr.eq: small, equal" {
@@ -541,68 +541,110 @@ pub const RocStr = extern struct {
     }
 };
 
-pub fn init(bytes_ptr: [*]const u8, length: usize) callconv(.C) RocStr {
+pub fn init(bytes_ptr: [*]const u8, length: usize) callconv(utils.cc) RocStr {
     return @call(.always_inline, RocStr.init, .{ bytes_ptr, length });
 }
 
 // Str.equal
-pub fn strEqual(self: RocStr, other: RocStr) callconv(.C) bool {
+pub fn strEqual(self: RocStr, other: RocStr) callconv(utils.cc) bool {
     return self.eq(other);
 }
 
 // Str.numberOfBytes
-pub fn strNumberOfBytes(string: RocStr) callconv(.C) usize {
+pub fn strNumberOfBytes(string: RocStr) callconv(utils.cc) usize {
     return string.len();
 }
 
 // Str.fromInt
 pub fn exportFromInt(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(int: T) callconv(.C) RocStr {
+        fn func(int: T) callconv(utils.cc) RocStr {
             return @call(.always_inline, strFromIntHelp, .{ T, int });
         }
     }.func;
 
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 fn strFromIntHelp(comptime T: type, int: T) RocStr {
-    // determine maximum size for this T
-    const size = comptime blk: {
-        // the string representation of the minimum i128 value uses at most 40 characters
-        var buf: [40]u8 = undefined;
-        const resultMin = std.fmt.bufPrint(&buf, "{}", .{std.math.minInt(T)}) catch unreachable;
-        const resultMax = std.fmt.bufPrint(&buf, "{}", .{std.math.maxInt(T)}) catch unreachable;
-        const result = if (resultMin.len > resultMax.len) resultMin.len else resultMax.len;
-        break :blk result;
-    };
-
+    const size = 40;
     var buf: [size]u8 = undefined;
-    const result = std.fmt.bufPrint(&buf, "{}", .{int}) catch unreachable;
+    const len = if (comptime utils.is_solana) blk: {
+        break :blk formatIntSimple(T, &buf, int);
+    } else blk: {
+        const result = std.fmt.bufPrint(&buf, "{}", .{int}) catch unreachable;
+        break :blk result.len;
+    };
+    return RocStr.init(&buf, len);
+}
 
-    return RocStr.init(&buf, result.len);
+fn formatIntSimple(comptime T: type, buf: []u8, value: T) usize {
+    var v = value;
+    var negative = false;
+
+    if (@typeInfo(T).int.signedness == .signed) {
+        if (v < 0) {
+            negative = true;
+            v = if (v == std.math.minInt(T)) blk: {
+                const U = @Type(.{ .int = .{ .signedness = .unsigned, .bits = @typeInfo(T).int.bits } });
+                break :blk @intCast(@as(U, @bitCast(v)));
+            } else -v;
+        }
+    }
+
+    var temp: [40]u8 = undefined;
+    var len: usize = 0;
+
+    if (v == 0) {
+        temp[len] = '0';
+        len += 1;
+    } else {
+        while (v > 0) {
+            temp[len] = @intCast('0' + @as(u8, @intCast(@mod(v, 10))));
+            v = @divTrunc(v, 10);
+            len += 1;
+        }
+    }
+
+    var pos: usize = 0;
+    if (negative) {
+        buf[pos] = '-';
+        pos += 1;
+    }
+
+    var i: usize = 0;
+    while (i < len) : (i += 1) {
+        buf[pos + i] = temp[len - 1 - i];
+    }
+
+    return pos + len;
 }
 
 // Str.fromFloat
 pub fn exportFromFloat(comptime T: type, comptime name: []const u8) void {
     const f = struct {
-        fn func(float: T) callconv(.C) RocStr {
+        fn func(float: T) callconv(utils.cc) RocStr {
             return @call(.always_inline, strFromFloatHelp, .{ T, float });
         }
     }.func;
 
-    @export(f, .{ .name = name ++ @typeName(T), .linkage = .strong });
+    @export(&f, .{ .name = name ++ @typeName(T), .linkage = .strong });
 }
 
 fn strFromFloatHelp(comptime T: type, float: T) RocStr {
     var buf: [400]u8 = undefined;
-    const result = std.fmt.bufPrint(&buf, "{d}", .{float}) catch unreachable;
-
-    return RocStr.init(&buf, result.len);
+    if (comptime utils.is_solana) {
+        const int_part: i64 = @intFromFloat(float);
+        const len = formatIntSimple(i64, &buf, int_part);
+        return RocStr.init(&buf, len);
+    } else {
+        const result = std.fmt.bufPrint(&buf, "{d}", .{float}) catch unreachable;
+        return RocStr.init(&buf, result.len);
+    }
 }
 
 // Str.splitOn
-pub fn strSplitOn(string: RocStr, delimiter: RocStr) callconv(.C) RocList {
+pub fn strSplitOn(string: RocStr, delimiter: RocStr) callconv(utils.cc) RocList {
     const segment_count = countSegments(string, delimiter);
     const list = RocList.allocate(@alignOf(RocStr), segment_count, @sizeOf(RocStr), true);
 
@@ -625,7 +667,7 @@ fn strSplitOnHelp(array: [*]RocStr, string: RocStr, delimiter: RocStr) void {
         return;
     }
 
-    var it = std.mem.split(u8, string.asSlice(), delimiter.asSlice());
+    var it = std.mem.splitSequence(u8, string.asSlice(), delimiter.asSlice());
 
     var i: usize = 0;
     var offset: usize = 0;
@@ -964,12 +1006,12 @@ test "strSplitHelp: overlapping delimiter 2" {
 // It is used to count how many segments the input `_str`
 // needs to be broken into, so that we can allocate a array
 // of that size. It always returns at least 1.
-pub fn countSegments(string: RocStr, delimiter: RocStr) callconv(.C) usize {
+pub fn countSegments(string: RocStr, delimiter: RocStr) callconv(utils.cc) usize {
     if (delimiter.isEmpty()) {
         return 1;
     }
 
-    var it = std.mem.split(u8, string.asSlice(), delimiter.asSlice());
+    var it = std.mem.splitSequence(u8, string.asSlice(), delimiter.asSlice());
     var count: usize = 0;
 
     while (it.next()) |_| : (count += 1) {}
@@ -1062,19 +1104,19 @@ test "countSegments: overlapping delimiter 2" {
     try expectEqual(segments_count, 3);
 }
 
-pub fn countUtf8Bytes(string: RocStr) callconv(.C) u64 {
+pub fn countUtf8Bytes(string: RocStr) callconv(utils.cc) u64 {
     return @intCast(string.len());
 }
 
-pub fn isEmpty(string: RocStr) callconv(.C) bool {
+pub fn isEmpty(string: RocStr) callconv(utils.cc) bool {
     return string.isEmpty();
 }
 
-pub fn getCapacity(string: RocStr) callconv(.C) usize {
+pub fn getCapacity(string: RocStr) callconv(utils.cc) usize {
     return string.getCapacity();
 }
 
-pub fn substringUnsafeC(string: RocStr, start_u64: u64, length_u64: u64) callconv(.C) RocStr {
+pub fn substringUnsafeC(string: RocStr, start_u64: u64, length_u64: u64) callconv(utils.cc) RocStr {
     const start: usize = @intCast(start_u64);
     const length: usize = @intCast(length_u64);
 
@@ -1113,7 +1155,7 @@ fn substringUnsafe(string: RocStr, start: usize, length: usize) RocStr {
     return RocStr.empty();
 }
 
-pub fn getUnsafeC(string: RocStr, index: u64) callconv(.C) u8 {
+pub fn getUnsafeC(string: RocStr, index: u64) callconv(utils.cc) u8 {
     return string.getUnchecked(@intCast(index));
 }
 
@@ -1154,7 +1196,7 @@ test "substringUnsafe: end" {
 }
 
 // Str.startsWith
-pub fn startsWith(string: RocStr, prefix: RocStr) callconv(.C) bool {
+pub fn startsWith(string: RocStr, prefix: RocStr) callconv(utils.cc) bool {
     const bytes_len = string.len();
     const bytes_ptr = string.asU8ptr();
 
@@ -1177,7 +1219,7 @@ pub fn startsWith(string: RocStr, prefix: RocStr) callconv(.C) bool {
 }
 
 // Str.repeat
-pub fn repeatC(string: RocStr, count_u64: u64) callconv(.C) RocStr {
+pub fn repeatC(string: RocStr, count_u64: u64) callconv(utils.cc) RocStr {
     const count: usize = @intCast(count_u64);
     const bytes_len = string.len();
     const bytes_ptr = string.asU8ptr();
@@ -1187,7 +1229,7 @@ pub fn repeatC(string: RocStr, count_u64: u64) callconv(.C) RocStr {
 
     var i: usize = 0;
     while (i < count) : (i += 1) {
-        @memcpy(ret_string_ptr[0..bytes_len], bytes_ptr[0..bytes_len]);
+        utils.memcpy(ret_string_ptr[0..bytes_len], bytes_ptr[0..bytes_len]);
         ret_string_ptr += bytes_len;
     }
 
@@ -1216,7 +1258,7 @@ test "startsWith: 12345678912345678910 starts with 123456789123456789" {
 }
 
 // Str.endsWith
-pub fn endsWith(string: RocStr, suffix: RocStr) callconv(.C) bool {
+pub fn endsWith(string: RocStr, suffix: RocStr) callconv(utils.cc) bool {
     const bytes_len = string.len();
     const bytes_ptr = string.asU8ptr();
 
@@ -1272,7 +1314,7 @@ test "endsWith: hello world ends with world" {
 }
 
 // Str.concat
-pub fn strConcatC(arg1: RocStr, arg2: RocStr) callconv(.C) RocStr {
+pub fn strConcatC(arg1: RocStr, arg2: RocStr) callconv(utils.cc) RocStr {
     return @call(.always_inline, strConcat, .{ arg1, arg2 });
 }
 
@@ -1286,7 +1328,7 @@ fn strConcat(arg1: RocStr, arg2: RocStr) RocStr {
         const combined_length = arg1.len() + arg2.len();
 
         var result = arg1.reallocate(combined_length);
-        @memcpy(result.asU8ptrMut()[arg1.len()..combined_length], arg2.asU8ptr()[0..arg2.len()]);
+        utils.memcpy(result.asU8ptrMut()[arg1.len()..combined_length], arg2.asU8ptr()[0..arg2.len()]);
 
         return result;
     }
@@ -1328,7 +1370,7 @@ pub const RocListStr = extern struct {
 };
 
 // Str.joinWith
-pub fn strJoinWithC(list: RocList, separator: RocStr) callconv(.C) RocStr {
+pub fn strJoinWithC(list: RocList, separator: RocStr) callconv(utils.cc) RocStr {
     const roc_list_str = RocListStr{
         .list_elements = @as(?[*]RocStr, @ptrCast(@alignCast(list.bytes))),
         .list_length = list.length,
@@ -1412,7 +1454,7 @@ test "RocStr.joinWith: result is big" {
 }
 
 // Str.toUtf8
-pub fn strToUtf8C(arg: RocStr) callconv(.C) RocList {
+pub fn strToUtf8C(arg: RocStr) callconv(utils.cc) RocList {
     return strToBytes(arg);
 }
 
@@ -1423,7 +1465,7 @@ inline fn strToBytes(arg: RocStr) RocList {
     } else if (arg.isSmallStr()) {
         const ptr = utils.allocateWithRefcount(length, RocStr.alignment, false);
 
-        @memcpy(ptr[0..length], arg.asU8ptr()[0..length]);
+        utils.memcpy(ptr[0..length], arg.asU8ptr()[0..length]);
 
         return RocList{ .length = length, .bytes = ptr, .capacity_or_alloc_ptr = length };
     } else {
@@ -1442,7 +1484,7 @@ const FromUtf8Result = extern struct {
 pub fn fromUtf8C(
     list: RocList,
     update_mode: UpdateMode,
-) callconv(.C) FromUtf8Result {
+) callconv(utils.cc) FromUtf8Result {
     return fromUtf8(list, update_mode);
 }
 
@@ -1520,7 +1562,7 @@ fn utf8EncodeLossy(c: u32, out: []u8) u3 {
 
 pub fn fromUtf8Lossy(
     list: RocList,
-) callconv(.C) RocStr {
+) callconv(utils.cc) RocStr {
     if (list.len() == 0) {
         return RocStr.empty();
     }
@@ -1615,7 +1657,7 @@ pub fn isValidUnicode(buf: []const u8) bool {
     var i: usize = 0;
     while (i + step < buf.len) {
         var bytes: u64 = undefined;
-        @memcpy(@as([*]u8, @ptrCast(&bytes))[0..size], buf[i..(i + size)]);
+        utils.memcpy(@as([*]u8, @ptrCast(&bytes))[0..size], buf[i..(i + size)]);
         const unicode_bytes = bytes & 0x8080_8080_8080_8080;
         if (unicode_bytes == 0) {
             i += step;
@@ -1628,7 +1670,7 @@ pub fn isValidUnicode(buf: []const u8) bool {
             // This forces prefetching, otherwise the loop can run at about half speed.
             if (i + 4 >= buf.len) break;
             var small_buf: [4]u8 = undefined;
-            @memcpy(small_buf[0..4], buf[i..(i + 4)]);
+            utils.memcpy(small_buf[0..4], buf[i..(i + 4)]);
             // TODO: Should we always inline these function calls below?
             if (std.unicode.utf8ByteSequenceLength(small_buf[0])) |cp_len| {
                 if (std.meta.isError(std.unicode.utf8Decode(small_buf[0..cp_len]))) {
@@ -1698,7 +1740,7 @@ fn expectOk(result: FromUtf8Result) !void {
 fn sliceHelp(bytes: [*]const u8, length: usize) RocList {
     var list = RocList.allocate(RocStr.alignment, length, @sizeOf(u8), false);
     var list_bytes = list.bytes orelse unreachable;
-    @memcpy(list_bytes[0..length], bytes[0..length]);
+    utils.memcpy(list_bytes[0..length], bytes[0..length]);
     list.length = length;
 
     return list;
@@ -1958,7 +2000,7 @@ test "isWhitespace" {
     try expect(!isWhitespace('x'));
 }
 
-pub fn strTrim(input_string: RocStr) callconv(.C) RocStr {
+pub fn strTrim(input_string: RocStr) callconv(utils.cc) RocStr {
     var string = input_string;
 
     if (string.isEmpty()) {
@@ -2007,7 +2049,7 @@ pub fn strTrim(input_string: RocStr) callconv(.C) RocStr {
     }
 }
 
-pub fn strTrimStart(input_string: RocStr) callconv(.C) RocStr {
+pub fn strTrimStart(input_string: RocStr) callconv(utils.cc) RocStr {
     var string = input_string;
 
     if (string.isEmpty()) {
@@ -2055,7 +2097,7 @@ pub fn strTrimStart(input_string: RocStr) callconv(.C) RocStr {
     }
 }
 
-pub fn strTrimEnd(input_string: RocStr) callconv(.C) RocStr {
+pub fn strTrimEnd(input_string: RocStr) callconv(utils.cc) RocStr {
     var string = input_string;
 
     if (string.isEmpty()) {
@@ -2136,7 +2178,7 @@ fn countTrailingWhitespaceBytes(string: RocStr) usize {
 }
 
 // Str.with_ascii_lowercased
-pub fn strWithAsciiLowercased(string: RocStr) callconv(.C) RocStr {
+pub fn strWithAsciiLowercased(string: RocStr) callconv(utils.cc) RocStr {
     var new_str = if (string.isUnique())
         string
     else blk: {
@@ -2196,7 +2238,7 @@ test "withAsciiLowercased: seamless slice" {
 }
 
 // Str.with_ascii_uppercased
-pub fn strWithAsciiUppercased(string: RocStr) callconv(.C) RocStr {
+pub fn strWithAsciiUppercased(string: RocStr) callconv(utils.cc) RocStr {
     var new_str = if (string.isUnique())
         string
     else blk: {
@@ -2255,7 +2297,7 @@ test "withAsciiUppercased: seamless slice" {
     try expect(str_result.eq(expected));
 }
 
-pub fn strCaselessAsciiEquals(self: RocStr, other: RocStr) callconv(.C) bool {
+pub fn strCaselessAsciiEquals(self: RocStr, other: RocStr) callconv(utils.cc) bool {
     if (self.bytes == other.bytes and self.length == other.length) {
         return true;
     }
@@ -2323,9 +2365,9 @@ test "caselessAsciiEquals: seamless slice" {
     try expect(are_equal);
 }
 
-fn rcNone(_: ?[*]u8) callconv(.C) void {}
+fn rcNone(_: ?[*]u8) callconv(utils.cc) void {}
 
-fn decStr(ptr: ?[*]u8) callconv(.C) void {
+fn decStr(ptr: ?[*]u8) callconv(utils.cc) void {
     const str_ptr = @as(*RocStr, @ptrCast(@alignCast(ptr orelse unreachable)));
     str_ptr.decref();
 }
@@ -2377,9 +2419,9 @@ const ReverseUtf8Iterator = struct {
 
         return switch (slice.len) {
             1 => @as(u21, slice[0]),
-            2 => unicode.utf8Decode2(slice) catch unreachable,
-            3 => unicode.utf8Decode3(slice) catch unreachable,
-            4 => unicode.utf8Decode4(slice) catch unreachable,
+            2 => unicode.utf8Decode2(slice[0..2].*) catch unreachable,
+            3 => unicode.utf8Decode3(slice[0..3].*) catch unreachable,
+            4 => unicode.utf8Decode4(slice[0..4].*) catch unreachable,
             else => unreachable,
         };
     }
@@ -2664,7 +2706,7 @@ test "capacity: big string" {
     try expect(data.getCapacity() >= data_bytes.len);
 }
 
-pub fn reserveC(string: RocStr, spare_u64: u64) callconv(.C) RocStr {
+pub fn reserveC(string: RocStr, spare_u64: u64) callconv(utils.cc) RocStr {
     return reserve(string, @intCast(spare_u64));
 }
 
@@ -2680,7 +2722,7 @@ fn reserve(string: RocStr, spare: usize) RocStr {
     }
 }
 
-pub fn withCapacityC(capacity: u64) callconv(.C) RocStr {
+pub fn withCapacityC(capacity: u64) callconv(utils.cc) RocStr {
     var str = RocStr.allocate(@intCast(capacity));
     str.setLen(0);
     return str;
@@ -2691,7 +2733,7 @@ pub fn strCloneTo(
     ptr: [*]u8,
     offset: usize,
     extra_offset: usize,
-) callconv(.C) usize {
+) callconv(utils.cc) usize {
     const WIDTH: usize = @sizeOf(RocStr);
     if (string.isSmallStr()) {
         const array: [@sizeOf(RocStr)]u8 = @as([@sizeOf(RocStr)]u8, @bitCast(string));
@@ -2710,10 +2752,10 @@ pub fn strCloneTo(
 
         // write the string struct
         const array = relative.asArray();
-        @memcpy(ptr[offset..(offset + WIDTH)], array[0..WIDTH]);
+        utils.memcpy(ptr[offset..(offset + WIDTH)], array[0..WIDTH]);
 
         // write the string bytes just after the struct
-        @memcpy(ptr[extra_offset..(extra_offset + slice.len)], slice);
+        utils.memcpy(ptr[extra_offset..(extra_offset + slice.len)], slice);
 
         return extra_offset + slice.len;
     }
@@ -2721,13 +2763,13 @@ pub fn strCloneTo(
 
 pub fn strAllocationPtr(
     string: RocStr,
-) callconv(.C) ?[*]u8 {
+) callconv(utils.cc) ?[*]u8 {
     return string.getAllocationPtr();
 }
 
 pub fn strReleaseExcessCapacity(
     string: RocStr,
-) callconv(.C) RocStr {
+) callconv(utils.cc) RocStr {
     const old_length = string.len();
     // We use the direct list.capacity_or_alloc_ptr to make sure both that there is no extra capacity and that it isn't a seamless slice.
     if (string.isSmallStr()) {
@@ -2743,7 +2785,7 @@ pub fn strReleaseExcessCapacity(
         const source_ptr = string.asU8ptr();
         const dest_ptr = output.asU8ptrMut();
 
-        @memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
+        utils.memcpy(dest_ptr[0..old_length], source_ptr[0..old_length]);
         string.decref();
 
         return output;

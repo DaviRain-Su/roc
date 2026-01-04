@@ -4,14 +4,21 @@ const testing = std.testing;
 const utils = @import("utils.zig");
 const roc_panic = @import("panic.zig").panic_help;
 
+// Simple assertion that doesn't use std.debug features (safe for Solana)
+inline fn sortAssert(ok: bool) void {
+    if (!ok) {
+        roc_panic("sort assertion failure", 0);
+    }
+}
+
 const Ordering = utils.Ordering;
 const GT = Ordering.GT;
 const LT = Ordering.LT;
 const EQ = Ordering.EQ;
 const Opaque = ?[*]u8;
-const CompareFn = *const fn (Opaque, Opaque, Opaque) callconv(.C) u8;
-const CopyFn = *const fn (Opaque, Opaque) callconv(.C) void;
-const IncN = *const fn (?[*]u8, usize) callconv(.C) void;
+const CompareFn = *const fn (Opaque, Opaque, Opaque) callconv(utils.cc) u8;
+const CopyFn = *const fn (Opaque, Opaque) callconv(utils.cc) void;
+const IncN = *const fn (?[*]u8, usize) callconv(utils.cc) void;
 
 /// Any size larger than the max element buffer will be sorted indirectly via pointers.
 /// TODO: tune this. I think due to llvm inlining the compare, the value likely should be lower.
@@ -26,7 +33,10 @@ const MAX_ELEMENT_BUFFER_SIZE: usize = 96;
 const BufferType = [MAX_ELEMENT_BUFFER_SIZE]u8;
 const BufferAlign = @alignOf(u128);
 comptime {
-    std.debug.assert(MAX_ELEMENT_BUFFER_SIZE % BufferAlign == 0);
+    // std.debug.assert is safe in comptime blocks - it doesn't use OS features
+    if (MAX_ELEMENT_BUFFER_SIZE % BufferAlign != 0) {
+        @compileError("MAX_ELEMENT_BUFFER_SIZE must be a multiple of BufferAlign");
+    }
 }
 
 // ================ Fluxsort ==================================================
@@ -1702,7 +1712,7 @@ fn partial_backwards_merge(
     inc_n_data: IncN,
     comptime indirect: bool,
 ) void {
-    std.debug.assert(swap_len >= block_len);
+    sortAssert(swap_len >= block_len);
 
     if (len == block_len) {
         // Just a single block, already done.
@@ -1941,7 +1951,7 @@ fn partial_forward_merge(
     inc_n_data: IncN,
     comptime indirect: bool,
 ) void {
-    std.debug.assert(swap_len >= block_len);
+    sortAssert(swap_len >= block_len);
 
     if (len == block_len) {
         // Just a single block, already done.
@@ -3096,7 +3106,7 @@ fn parity_merge(
     inc_n_data: IncN,
     comptime indirect: bool,
 ) void {
-    std.debug.assert(left_len == right_len or left_len == right_len - 1 or left_len - 1 == right_len);
+    sortAssert(left_len == right_len or left_len == right_len - 1 or left_len - 1 == right_len);
 
     var left_head = src;
     var right_head = src + left_len * element_width;
@@ -3220,7 +3230,7 @@ fn tiny_sort(
     inc_n_data: IncN,
     comptime indirect: bool,
 ) void {
-    std.debug.assert(len < 8);
+    sortAssert(len < 8);
 
     var buffer: BufferType align(BufferAlign) = undefined;
     const tmp_ptr = @as([*]u8, @ptrCast(&buffer[0]));
@@ -3889,13 +3899,13 @@ test "swap" {
     try testing.expectEqual(arr, [2]i64{ -22, -22 });
 }
 
-pub fn pointer_copy(dst_ptr: Opaque, src_ptr: Opaque) callconv(.C) void {
-    @as(*usize, @alignCast(@ptrCast(dst_ptr))).* = @as(*usize, @alignCast(@ptrCast(src_ptr))).*;
+pub fn pointer_copy(dst_ptr: Opaque, src_ptr: Opaque) callconv(utils.cc) void {
+    @as(*usize, @ptrCast(@alignCast(dst_ptr))).* = @as(*usize, @ptrCast(@alignCast(src_ptr))).*;
 }
 
-fn test_i64_compare(_: Opaque, a_ptr: Opaque, b_ptr: Opaque) callconv(.C) u8 {
-    const a = @as(*i64, @alignCast(@ptrCast(a_ptr))).*;
-    const b = @as(*i64, @alignCast(@ptrCast(b_ptr))).*;
+fn test_i64_compare(_: Opaque, a_ptr: Opaque, b_ptr: Opaque) callconv(utils.cc) u8 {
+    const a = @as(*i64, @ptrCast(@alignCast(a_ptr))).*;
+    const b = @as(*i64, @ptrCast(@alignCast(b_ptr))).*;
 
     const gt = @as(u8, @intFromBool(a > b));
     const lt = @as(u8, @intFromBool(a < b));
@@ -3906,9 +3916,9 @@ fn test_i64_compare(_: Opaque, a_ptr: Opaque, b_ptr: Opaque) callconv(.C) u8 {
     return lt + lt + gt;
 }
 
-fn test_i64_compare_refcounted(count_ptr: Opaque, a_ptr: Opaque, b_ptr: Opaque) callconv(.C) u8 {
-    const a = @as(*i64, @alignCast(@ptrCast(a_ptr))).*;
-    const b = @as(*i64, @alignCast(@ptrCast(b_ptr))).*;
+fn test_i64_compare_refcounted(count_ptr: Opaque, a_ptr: Opaque, b_ptr: Opaque) callconv(utils.cc) u8 {
+    const a = @as(*i64, @ptrCast(@alignCast(a_ptr))).*;
+    const b = @as(*i64, @ptrCast(@alignCast(b_ptr))).*;
 
     const gt = @as(u8, @intFromBool(a > b));
     const lt = @as(u8, @intFromBool(a < b));
@@ -3920,10 +3930,10 @@ fn test_i64_compare_refcounted(count_ptr: Opaque, a_ptr: Opaque, b_ptr: Opaque) 
     return lt + lt + gt;
 }
 
-fn test_i64_copy(dst_ptr: Opaque, src_ptr: Opaque) callconv(.C) void {
-    @as(*i64, @alignCast(@ptrCast(dst_ptr))).* = @as(*i64, @alignCast(@ptrCast(src_ptr))).*;
+fn test_i64_copy(dst_ptr: Opaque, src_ptr: Opaque) callconv(utils.cc) void {
+    @as(*i64, @ptrCast(@alignCast(dst_ptr))).* = @as(*i64, @ptrCast(@alignCast(src_ptr))).*;
 }
 
-fn test_inc_n_data(count_ptr: Opaque, n: usize) callconv(.C) void {
+fn test_inc_n_data(count_ptr: Opaque, n: usize) callconv(utils.cc) void {
     @as(*isize, @ptrCast(@alignCast(count_ptr))).* += @intCast(n);
 }

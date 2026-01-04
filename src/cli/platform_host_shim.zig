@@ -219,7 +219,9 @@ fn addRocSerializedModule(builder: *Builder, target: RocTarget, serialized_modul
         const array_var = try builder.addVariable(internal_name, str_const.typeOf(builder), .default);
         try array_var.setInitializer(str_const, builder);
         array_var.setLinkage(.internal, builder);
-        array_var.setMutability(.global, builder);
+        // Use .constant mutability so data goes into .rodata instead of .data
+        // This is critical for Solana BPF which doesn't allow writable data sections
+        array_var.setMutability(.constant, builder);
         array_var.setAlignment(Builder.Alignment.fromByteUnits(8), builder);
 
         // Create the external base_ptr variable pointing to the internal array

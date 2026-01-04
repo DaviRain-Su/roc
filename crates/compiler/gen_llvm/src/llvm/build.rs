@@ -6,7 +6,7 @@ use crate::llvm::convert::{
     argument_type_from_layout, basic_type_from_builtin, basic_type_from_layout, zig_str_type,
 };
 use crate::llvm::expect::{clone_to_shared_memory, SharedMemoryPointer};
-use crate::llvm::memcpy::build_memcpy;
+use crate::llvm::memcpy::{build_memcpy, build_memcpy_raw};
 use crate::llvm::refcounting::{
     build_reset, decrement_refcount_layout, increment_refcount_layout, PointerToRefcount,
 };
@@ -1035,6 +1035,9 @@ pub fn module_from_builtins<'ctx>(
             Target::WinX64 => {
                 include_bytes!("../../../builtins/bitcode/zig-out/builtins-windows-x86_64.bc")
             }
+            Target::Sbf => {
+                include_bytes!("../../../builtins/bitcode/zig-out/builtins-sbf.bc")
+            }
             _ => panic!("The zig builtins are not currently built for this target: {target:?}"),
         }
     };
@@ -1100,6 +1103,12 @@ pub fn module_from_builtins<'ctx>(
     add_intrinsics(ctx, &module);
 
     module
+}
+
+fn fix_inline_intrinsics_for_sbf<'ctx>(_ctx: &'ctx Context, _module: &Module<'ctx>) {
+    // TODO: Implement inline intrinsic replacement for SBF
+    // Currently, the builtins use utils.memcpy/utils.memset wrappers
+    // which call external C functions instead of @memcpy/@memset for SBF
 }
 
 fn promote_to_main_function<'a, 'ctx>(
@@ -2925,9 +2934,14 @@ fn list_literal<'a, 'ctx>(
         let byte_size = env
             .ptr_int()
             .const_int(list_length as u64 * element_width as u64, false);
-        builder
-            .build_memcpy(data_ptr, alignment, const_data_ptr, alignment, byte_size)
-            .unwrap();
+        build_memcpy_raw(
+            env,
+            data_ptr,
+            alignment,
+            const_data_ptr,
+            alignment,
+            byte_size,
+        );
 
         super::build_list::store_list(env, data_ptr, list_length_intval).into()
     } else {
@@ -3269,15 +3283,14 @@ pub(crate) fn build_exp_stmt<'a, 'ctx>(
                             layout_interner.get_repr(layout),
                         );
                         let tmp = create_entry_block_alloca(env, basic_type, "tmp_output_for_jmp");
-                        builder
-                            .build_memcpy(
-                                tmp,
-                                alignment,
-                                value.into_pointer_value(),
-                                alignment,
-                                env.ptr_int().const_int(size as _, false),
-                            )
-                            .unwrap();
+                        build_memcpy_raw(
+                            env,
+                            tmp,
+                            alignment,
+                            value.into_pointer_value(),
+                            alignment,
+                            env.ptr_int().const_int(size as _, false),
+                        );
                         to_resolve.push((alloca, tmp, alignment, size));
                     }
                     crate::llvm::scope::JoinPointArg::Phi(phi) => {
@@ -3286,15 +3299,14 @@ pub(crate) fn build_exp_stmt<'a, 'ctx>(
                 }
             }
             for (alloca, tmp, alignment, size) in to_resolve {
-                builder
-                    .build_memcpy(
-                        *alloca,
-                        alignment,
-                        tmp,
-                        alignment,
-                        env.ptr_int().const_int(size as _, false),
-                    )
-                    .unwrap();
+                build_memcpy_raw(
+                    env,
+                    *alloca,
+                    alignment,
+                    tmp,
+                    alignment,
+                    env.ptr_int().const_int(size as _, false),
+                );
             }
 
             builder.new_build_unconditional_branch(*cont_block);
@@ -6549,9 +6561,8 @@ pub fn to_cc_return<'a>(
         roc_target::OperatingSystem::Windows => return_size > env.target.ptr_width() as u32,
         roc_target::OperatingSystem::Linux
         | roc_target::OperatingSystem::Mac
-        | roc_target::OperatingSystem::Freestanding => {
-            return_size > 2 * env.target.ptr_width() as u32
-        }
+        | roc_target::OperatingSystem::Freestanding
+        | roc_target::OperatingSystem::Solana => return_size > 2 * env.target.ptr_width() as u32,
     };
 
     if return_size == 0 {

@@ -13,44 +13,43 @@ const STR = "str";
 // Dec Module
 const dec = @import("dec.zig");
 
-var FLTUSED: i32 = 0;
-comptime {
-    if (builtin.os.tag == .windows) {
-        @export(FLTUSED, .{ .name = "_fltused", .linkage = .weak });
-    }
-}
+// Note: _fltused is already exported by Zig's compiler_rt for Windows
+// so we don't need to export it again
 
 comptime {
     exportDecFn(dec.absC, "abs");
-    exportDecFn(dec.acosC, "acos");
     exportDecFn(dec.addC, "add_with_overflow");
     exportDecFn(dec.addOrPanicC, "add_or_panic");
     exportDecFn(dec.addSaturatedC, "add_saturated");
-    exportDecFn(dec.asinC, "asin");
-    exportDecFn(dec.atanC, "atan");
-    exportDecFn(dec.cosC, "cos");
     exportDecFn(dec.divC, "div");
     exportDecFn(dec.eqC, "eq");
     exportDecFn(dec.fromF32C, "from_float.f32");
     exportDecFn(dec.fromF64C, "from_float.f64");
     exportDecFn(dec.fromStr, "from_str");
     exportDecFn(dec.fromU64C, "from_u64");
-    exportDecFn(dec.logC, "log");
-    exportDecFn(dec.powC, "pow");
     exportDecFn(dec.mulC, "mul_with_overflow");
     exportDecFn(dec.mulOrPanicC, "mul_or_panic");
     exportDecFn(dec.mulSaturatedC, "mul_saturated");
     exportDecFn(dec.negateC, "negate");
     exportDecFn(dec.neqC, "neq");
-    exportDecFn(dec.sinC, "sin");
     exportDecFn(dec.subC, "sub_with_overflow");
     exportDecFn(dec.subOrPanicC, "sub_or_panic");
     exportDecFn(dec.subSaturatedC, "sub_saturated");
-    exportDecFn(dec.tanC, "tan");
     exportDecFn(dec.toF64, "to_f64");
     exportDecFn(dec.toI128, "to_i128");
     exportDecFn(dec.fromI128, "from_i128");
     exportDecFn(dec.to_str, "to_str");
+
+    if (!utils.is_solana) {
+        exportDecFn(dec.acosC, "acos");
+        exportDecFn(dec.asinC, "asin");
+        exportDecFn(dec.atanC, "atan");
+        exportDecFn(dec.cosC, "cos");
+        exportDecFn(dec.logC, "log");
+        exportDecFn(dec.powC, "pow");
+        exportDecFn(dec.sinC, "sin");
+        exportDecFn(dec.tanC, "tan");
+    }
 
     for (INTEGERS) |T| {
         dec.exportFromInt(T, ROC_BUILTINS ++ ".dec.from_int.");
@@ -224,12 +223,24 @@ comptime {
 
     for (INTEGERS) |T| {
         str.exportFromInt(T, ROC_BUILTINS ++ "." ++ STR ++ ".from_int.");
-        num.exportParseInt(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_int.");
+        // exportParseInt uses std.fmt.parseInt which pulls in Writer code with inline intrinsics
+        // For SBF, use simple implementation that avoids std.fmt
+        if (utils.is_solana) {
+            num.exportParseIntSbf(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_int.");
+        } else {
+            num.exportParseInt(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_int.");
+        }
     }
 
     for (FLOATS) |T| {
         str.exportFromFloat(T, ROC_BUILTINS ++ "." ++ STR ++ ".from_float.");
-        num.exportParseFloat(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_float.");
+        // exportParseFloat uses std.fmt.parseFloat which pulls in Writer code with inline intrinsics
+        // For SBF, use simple implementation that avoids std.fmt
+        if (utils.is_solana) {
+            num.exportParseFloatSbf(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_float.");
+        } else {
+            num.exportParseFloat(T, ROC_BUILTINS ++ "." ++ STR ++ ".to_float.");
+        }
     }
 }
 
@@ -248,26 +259,29 @@ comptime {
     exportUtilsFn(utils.allocateWithRefcountC, "allocate_with_refcount");
     exportUtilsFn(utils.dictPseudoSeed, "dict_pseudo_seed");
 
-    @export(panic_utils.panic, .{ .name = "roc_builtins.utils." ++ "panic", .linkage = .weak });
-    @export(dbg_utils.dbg_impl, .{ .name = "roc_builtins.utils." ++ "dbg_impl", .linkage = .weak });
+    @export(&panic_utils.panic, .{ .name = "roc_builtins.utils." ++ "panic", .linkage = .weak });
+    @export(&dbg_utils.dbg_impl, .{ .name = "roc_builtins.utils." ++ "dbg_impl", .linkage = .weak });
 
-    if (builtin.target.cpu.arch != .wasm32) {
+    // Expect functions use OS-specific features not available on wasm32 or Solana
+    const has_sbf_target = @hasField(std.Target.Cpu.Arch, "sbf");
+    const is_solana_target = has_sbf_target and builtin.cpu.arch == .sbf;
+    if (builtin.target.cpu.arch != .wasm32 and !is_solana_target) {
         exportUtilsFn(expect.expectFailedStartSharedBuffer, "expect_failed_start_shared_buffer");
         exportUtilsFn(expect.expectFailedStartSharedFile, "expect_failed_start_shared_file");
         exportUtilsFn(expect.notifyParentExpect, "notify_parent_expect");
 
         // sets the buffer used for expect failures
-        @export(expect.setSharedBuffer, .{ .name = "set_shared_buffer", .linkage = .weak });
+        @export(&expect.setSharedBuffer, .{ .name = "set_shared_buffer", .linkage = .weak });
 
         exportUtilsFn(expect.readSharedBufferEnv, "read_env_shared_buffer");
     }
 
     if (builtin.target.cpu.arch == .aarch64) {
-        @export(__roc_force_setjmp, .{ .name = "__roc_force_setjmp", .linkage = .weak });
-        @export(__roc_force_longjmp, .{ .name = "__roc_force_longjmp", .linkage = .weak });
+        @export(&__roc_force_setjmp, .{ .name = "__roc_force_setjmp", .linkage = .weak });
+        @export(&__roc_force_longjmp, .{ .name = "__roc_force_longjmp", .linkage = .weak });
     } else if (builtin.os.tag == .windows) {
-        @export(__roc_force_setjmp_windows, .{ .name = "__roc_force_setjmp", .linkage = .weak });
-        @export(__roc_force_longjmp_windows, .{ .name = "__roc_force_longjmp", .linkage = .weak });
+        @export(&__roc_force_setjmp_windows, .{ .name = "__roc_force_setjmp", .linkage = .weak });
+        @export(&__roc_force_longjmp_windows, .{ .name = "__roc_force_longjmp", .linkage = .weak });
     }
 }
 
@@ -285,22 +299,22 @@ pub extern fn siglongjmp([*c]c_int, c_int) noreturn;
 pub extern fn longjmperror() void;
 
 // Zig won't expose the externs (and hence link correctly) unless we force them to be used.
-fn __roc_force_setjmp(it: [*c]c_int) callconv(.C) c_int {
+fn __roc_force_setjmp(it: [*c]c_int) callconv(utils.cc) c_int {
     return setjmp(it);
 }
 
-fn __roc_force_longjmp(a0: [*c]c_int, a1: c_int) callconv(.C) noreturn {
+fn __roc_force_longjmp(a0: [*c]c_int, a1: c_int) callconv(utils.cc) noreturn {
     longjmp(a0, a1);
 }
 
 pub extern fn windows_setjmp([*c]c_int) c_int;
 pub extern fn windows_longjmp([*c]c_int, c_int) noreturn;
 
-fn __roc_force_setjmp_windows(it: [*c]c_int) callconv(.C) c_int {
+fn __roc_force_setjmp_windows(it: [*c]c_int) callconv(utils.cc) c_int {
     return windows_setjmp(it);
 }
 
-fn __roc_force_longjmp_windows(a0: [*c]c_int, a1: c_int) callconv(.C) noreturn {
+fn __roc_force_longjmp_windows(a0: [*c]c_int, a1: c_int) callconv(utils.cc) noreturn {
     windows_longjmp(a0, a1);
 }
 
@@ -382,7 +396,7 @@ comptime {
 
 // Export helpers - Must be run inside a comptime
 fn exportBuiltinFn(comptime func: anytype, comptime func_name: []const u8) void {
-    @export(func, .{ .name = "roc_builtins." ++ func_name, .linkage = .strong });
+    @export(&func, .{ .name = "roc_builtins." ++ func_name, .linkage = .strong });
 }
 fn exportNumFn(comptime func: anytype, comptime func_name: []const u8) void {
     exportBuiltinFn(func, "num." ++ func_name);
@@ -406,11 +420,15 @@ fn exportUtilsFn(comptime func: anytype, comptime func_name: []const u8) void {
 
 // Custom panic function, as builtin Zig version errors during LLVM verification
 pub fn panic(message: []const u8, stacktrace: ?*std.builtin.StackTrace, _: ?usize) noreturn {
-    if (builtin.target.cpu.arch != .wasm32) {
-        std.debug.print("\nSomehow in unreachable zig panic!\nThis is a roc standard libarry bug\n{s}: {?}", .{ message, stacktrace });
+    // Check if SBF target is supported (solana-zig only)
+    const has_sbf = @hasField(std.Target.Cpu.Arch, "sbf");
+    const is_solana = has_sbf and builtin.cpu.arch == .sbf;
+
+    if (builtin.target.cpu.arch != .wasm32 and !is_solana) {
+        std.debug.print("\nSomehow in unreachable zig panic!\nThis is a roc standard libarry bug\n{s}: {any}", .{ message, stacktrace });
         std.process.abort();
     } else {
-        // Can't call abort or print from wasm. Just leave it as unreachable.
+        // Can't call abort or print from wasm or Solana. Just leave it as unreachable.
         unreachable;
     }
 }

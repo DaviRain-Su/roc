@@ -386,6 +386,15 @@ fn gen_from_mono_module_llvm<'a>(
                 // module.print_to_file(app_ll_file);
                 module.write_bitcode_to_memory()
             }
+            Architecture::Sbf => {
+                // For SBF/Solana, emit bitcode - it will be compiled to SBF by external tools
+                // The SBF target is not available in standard LLVM, so we can't use target_machine
+                if emit_llvm_ir {
+                    eprintln!("Emitting SBF LLVM IR to {}", &app_ll_file.display());
+                    module.print_to_file(&app_ll_file).unwrap();
+                }
+                module.write_bitcode_to_memory()
+            }
             _ => internal_error!(
                 "TODO gracefully handle unsupported architecture: {:?}",
                 target.architecture()
@@ -463,6 +472,12 @@ fn gen_from_mono_module_dev<'a>(
         }
         (_, Architecture::X86_32) => {
             internal_error!("Dev compiler backend does not support 32 bit x86 architectures")
+        }
+        (_, Architecture::Sbf) => {
+            // SBF uses LLVM backend, not dev backend
+            internal_error!(
+                "Dev compiler backend does not support SBF architecture. Use LLVM backend."
+            )
         }
     }
 }

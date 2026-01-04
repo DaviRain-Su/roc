@@ -922,18 +922,19 @@ impl From<Architecture> for roc_type::Architecture {
             Architecture::Wasm32 => roc_type::Architecture::Wasm32,
             Architecture::X86_32 => roc_type::Architecture::X86x32,
             Architecture::X86_64 => roc_type::Architecture::X86x64,
+            Architecture::Sbf => roc_type::Architecture::Aarch64,
         }
     }
 }
 
 impl From<OperatingSystem> for roc_type::OperatingSystem {
     fn from(os: OperatingSystem) -> Self {
-        // TODO: Update Glue to new OS Tags.
         match os {
             OperatingSystem::Windows => roc_type::OperatingSystem::Windows,
             OperatingSystem::Linux => roc_type::OperatingSystem::Linux,
             OperatingSystem::Mac => roc_type::OperatingSystem::Mac,
             OperatingSystem::Freestanding => roc_type::OperatingSystem::Freestanding,
+            OperatingSystem::Solana => roc_type::OperatingSystem::Freestanding,
         }
     }
 }

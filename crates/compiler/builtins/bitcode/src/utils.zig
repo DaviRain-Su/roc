@@ -1,6 +1,48 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Check if SBF target is supported (solana-zig only)
+const has_sbf = @hasField(std.Target.Cpu.Arch, "sbf");
+
+// Check if we're compiling for Solana (SBF target)
+// On Solana, std.debug.print and other OS-specific features are unavailable
+pub const is_solana = has_sbf and builtin.cpu.arch == .sbf;
+
+// External C functions for memory operations (used by SBF targets)
+extern fn memcpy_c(dest: [*]u8, src: [*]const u8, n: usize) callconv(.c) [*]u8;
+extern fn memset_c(dest: [*]u8, c: i32, n: usize) callconv(.c) [*]u8;
+
+// Memory copy that works on SBF targets
+// On SBF, @memcpy generates llvm.memcpy.inline which requires constant sizes.
+// This wrapper uses explicit function calls for SBF to avoid that constraint.
+pub inline fn memcpy(dest: []u8, src: []const u8) void {
+    if (comptime is_solana) {
+        _ = memcpy_c(dest.ptr, src.ptr, dest.len);
+    } else {
+        @memcpy(dest, src);
+    }
+}
+
+// Memory set that works on SBF targets
+pub inline fn memset(dest: []u8, value: u8) void {
+    if (comptime is_solana) {
+        _ = memset_c(dest.ptr, @as(i32, value), dest.len);
+    } else {
+        @memset(dest, value);
+    }
+}
+
+// Determine calling convention based on target
+pub const cc: std.builtin.CallingConvention = blk: {
+    if (has_sbf and builtin.cpu.arch == .sbf) {
+        break :blk .{ .bpf_std = .{} };
+    } else if (builtin.target.cCallingConvention()) |c| {
+        break :blk c;
+    } else {
+        break :blk .auto;
+    }
+};
+
 const DEBUG_INCDEC = false;
 const DEBUG_TESTING_ALLOC = false;
 const DEBUG_ALLOC = false;
@@ -10,19 +52,19 @@ pub fn WithOverflow(comptime T: type) type {
 }
 
 // If allocation fails, this must cxa_throw - it must not return a null pointer!
-extern fn roc_alloc(size: usize, alignment: u32) callconv(.C) ?*anyopaque;
+extern fn roc_alloc(size: usize, alignment: u32) callconv(cc) ?*anyopaque;
 
 // This should never be passed a null pointer.
 // If allocation fails, this must cxa_throw - it must not return a null pointer!
-extern fn roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, alignment: u32) callconv(.C) ?*anyopaque;
+extern fn roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, alignment: u32) callconv(cc) ?*anyopaque;
 
 // This should never be passed a null pointer.
-extern fn roc_dealloc(c_ptr: *anyopaque, alignment: u32) callconv(.C) void;
+extern fn roc_dealloc(c_ptr: *anyopaque, alignment: u32) callconv(cc) void;
 
-extern fn roc_dbg(loc: *anyopaque, message: *anyopaque, src: *anyopaque) callconv(.C) void;
+extern fn roc_dbg(loc: *anyopaque, message: *anyopaque, src: *anyopaque) callconv(cc) void;
 
 // Since roc_dbg is never used by the builtins, we need at export a function that uses it to stop DCE.
-pub fn test_dbg(loc: *anyopaque, src: *anyopaque, message: *anyopaque) callconv(.C) void {
+pub fn test_dbg(loc: *anyopaque, src: *anyopaque, message: *anyopaque) callconv(cc) void {
     roc_dbg(loc, message, src);
 }
 
@@ -31,22 +73,22 @@ extern fn shm_open(name: *const i8, oflag: c_int, mode: c_uint) c_int;
 extern fn mmap(addr: ?*anyopaque, length: c_uint, prot: c_int, flags: c_int, fd: c_int, offset: c_uint) *anyopaque;
 extern fn getppid() c_int;
 
-fn testing_roc_getppid() callconv(.C) c_int {
+fn testing_roc_getppid() callconv(cc) c_int {
     return getppid();
 }
 
-fn roc_getppid_windows_stub() callconv(.C) c_int {
+fn roc_getppid_windows_stub() callconv(cc) c_int {
     return 0;
 }
 
-fn testing_roc_shm_open(name: *const i8, oflag: c_int, mode: c_uint) callconv(.C) c_int {
+fn testing_roc_shm_open(name: *const i8, oflag: c_int, mode: c_uint) callconv(cc) c_int {
     return shm_open(name, oflag, mode);
 }
-fn testing_roc_mmap(addr: ?*anyopaque, length: c_uint, prot: c_int, flags: c_int, fd: c_int, offset: c_uint) callconv(.C) *anyopaque {
+fn testing_roc_mmap(addr: ?*anyopaque, length: c_uint, prot: c_int, flags: c_int, fd: c_int, offset: c_uint) callconv(cc) *anyopaque {
     return mmap(addr, length, prot, flags, fd, offset);
 }
 
-fn testing_roc_dbg(loc: *anyopaque, message: *anyopaque, src: *anyopaque) callconv(.C) void {
+fn testing_roc_dbg(loc: *anyopaque, message: *anyopaque, src: *anyopaque) callconv(cc) void {
     _ = message;
     _ = src;
     _ = loc;
@@ -55,25 +97,25 @@ fn testing_roc_dbg(loc: *anyopaque, message: *anyopaque, src: *anyopaque) callco
 comptime {
     // During tests, use the testing allocators to satisfy these functions.
     if (builtin.is_test) {
-        @export(testing_roc_alloc, .{ .name = "roc_alloc", .linkage = .strong });
-        @export(testing_roc_realloc, .{ .name = "roc_realloc", .linkage = .strong });
-        @export(testing_roc_dealloc, .{ .name = "roc_dealloc", .linkage = .strong });
-        @export(testing_roc_panic, .{ .name = "roc_panic", .linkage = .strong });
-        @export(testing_roc_dbg, .{ .name = "roc_dbg", .linkage = .strong });
+        @export(&testing_roc_alloc, .{ .name = "roc_alloc", .linkage = .strong });
+        @export(&testing_roc_realloc, .{ .name = "roc_realloc", .linkage = .strong });
+        @export(&testing_roc_dealloc, .{ .name = "roc_dealloc", .linkage = .strong });
+        @export(&testing_roc_panic, .{ .name = "roc_panic", .linkage = .strong });
+        @export(&testing_roc_dbg, .{ .name = "roc_dbg", .linkage = .strong });
 
         if (builtin.os.tag == .macos or builtin.os.tag == .linux) {
-            @export(testing_roc_getppid, .{ .name = "roc_getppid", .linkage = .strong });
-            @export(testing_roc_mmap, .{ .name = "roc_mmap", .linkage = .strong });
-            @export(testing_roc_shm_open, .{ .name = "roc_shm_open", .linkage = .strong });
+            @export(&testing_roc_getppid, .{ .name = "roc_getppid", .linkage = .strong });
+            @export(&testing_roc_mmap, .{ .name = "roc_mmap", .linkage = .strong });
+            @export(&testing_roc_shm_open, .{ .name = "roc_shm_open", .linkage = .strong });
         }
 
         if (builtin.os.tag == .windows) {
-            @export(roc_getppid_windows_stub, .{ .name = "roc_getppid", .linkage = .strong });
+            @export(&roc_getppid_windows_stub, .{ .name = "roc_getppid", .linkage = .strong });
         }
     }
 }
 
-fn testing_roc_alloc(size: usize, nominal_alignment: u32) callconv(.C) ?*anyopaque {
+fn testing_roc_alloc(size: usize, nominal_alignment: u32) callconv(cc) ?*anyopaque {
     const real_alignment = 16;
     if (nominal_alignment > real_alignment) {
         @panic("alignments larger than that of 2 usize are not currently supported");
@@ -91,14 +133,14 @@ fn testing_roc_alloc(size: usize, nominal_alignment: u32) callconv(.C) ?*anyopaq
 
     const data_ptr = @as(?*anyopaque, @ptrCast(whole_ptr + extra_bytes));
 
-    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("+ alloc {*}: {} bytes\n", .{ data_ptr, size });
     }
 
     return data_ptr;
 }
 
-fn testing_roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, nominal_alignment: u32) callconv(.C) ?*anyopaque {
+fn testing_roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, nominal_alignment: u32) callconv(cc) ?*anyopaque {
     const real_alignment = 16;
     if (nominal_alignment > real_alignment) {
         @panic("alignments larger than that of 2 usize are not currently supported");
@@ -108,18 +150,18 @@ fn testing_roc_realloc(c_ptr: *anyopaque, new_size: usize, old_size: usize, nomi
 
     const new_full_size = new_size + @sizeOf(usize);
     var new_raw_ptr = @as([*]u8, @alignCast((std.testing.allocator.realloc(slice, new_full_size) catch unreachable).ptr));
-    @as([*]usize, @alignCast(@ptrCast(new_raw_ptr)))[0] = new_full_size;
+    @as([*]usize, @ptrCast(@alignCast(new_raw_ptr)))[0] = new_full_size;
     new_raw_ptr += @sizeOf(usize);
     const new_ptr = @as(?*anyopaque, @ptrCast(new_raw_ptr));
 
-    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("- realloc {*}\n", .{new_ptr});
     }
 
     return new_ptr;
 }
 
-fn testing_roc_dealloc(c_ptr: *anyopaque, _: u32) callconv(.C) void {
+fn testing_roc_dealloc(c_ptr: *anyopaque, _: u32) callconv(cc) void {
     const alignment = 16;
     const size_of_size = @sizeOf(usize);
     const alignments_needed = size_of_size / alignment + comptime if (size_of_size % alignment == 0) 0 else 1;
@@ -127,18 +169,18 @@ fn testing_roc_dealloc(c_ptr: *anyopaque, _: u32) callconv(.C) void {
     const byte_array = @as([*]u8, @ptrCast(c_ptr)) - extra_bytes;
     const allocation_ptr = @as([*]align(alignment) u8, @alignCast(byte_array));
     const offset_from_allocation_to_size = extra_bytes - size_of_size;
-    const size_of_data_and_size = @as([*]usize, @alignCast(@ptrCast(allocation_ptr)))[offset_from_allocation_to_size];
+    const size_of_data_and_size = @as([*]usize, @ptrCast(@alignCast(allocation_ptr)))[offset_from_allocation_to_size];
     const full_size = size_of_data_and_size + offset_from_allocation_to_size;
     const slice = allocation_ptr[0..full_size];
 
-    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_TESTING_ALLOC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("💀 dealloc {*}\n", .{slice.ptr});
     }
 
     std.testing.allocator.free(slice);
 }
 
-fn testing_roc_panic(c_ptr: *anyopaque, tag_id: u32) callconv(.C) void {
+fn testing_roc_panic(c_ptr: *anyopaque, tag_id: u32) callconv(cc) void {
     _ = c_ptr;
     _ = tag_id;
 
@@ -150,7 +192,7 @@ pub fn alloc(size: usize, alignment: u32) ?[*]u8 {
 }
 
 pub fn realloc(c_ptr: [*]u8, new_size: usize, old_size: usize, alignment: u32) [*]u8 {
-    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("- realloc {*}\n", .{c_ptr});
     }
     return @as([*]u8, @ptrCast(roc_realloc(c_ptr, new_size, old_size, alignment)));
@@ -162,7 +204,7 @@ pub fn dealloc(c_ptr: [*]u8, alignment: u32) void {
 
 // indirection because otherwise zig creates an alias to the panic function which our LLVM code
 // does not know how to deal with
-pub fn test_panic(c_ptr: *anyopaque, crash_tag: u32) callconv(.C) void {
+pub fn test_panic(c_ptr: *anyopaque, crash_tag: u32) callconv(cc) void {
     _ = c_ptr;
     _ = crash_tag;
 
@@ -174,9 +216,9 @@ pub fn test_panic(c_ptr: *anyopaque, crash_tag: u32) callconv(.C) void {
     //    std.c.exit(1);
 }
 
-pub const Inc = fn (?[*]u8) callconv(.C) void;
-pub const IncN = fn (?[*]u8, u64) callconv(.C) void;
-pub const Dec = fn (?[*]u8) callconv(.C) void;
+pub const Inc = fn (?[*]u8) callconv(cc) void;
+pub const IncN = fn (?[*]u8, u64) callconv(cc) void;
+pub const Dec = fn (?[*]u8) callconv(cc) void;
 
 const REFCOUNT_MAX_ISIZE: isize = 0;
 
@@ -201,10 +243,10 @@ const Refcount = enum {
 
 const RC_TYPE: Refcount = .atomic;
 
-pub fn increfRcPtrC(ptr_to_refcount: *isize, amount: isize) callconv(.C) void {
+pub fn increfRcPtrC(ptr_to_refcount: *isize, amount: isize) callconv(cc) void {
     if (RC_TYPE == .none) return;
 
-    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("| increment {*}: ", .{ptr_to_refcount});
     }
 
@@ -215,7 +257,7 @@ pub fn increfRcPtrC(ptr_to_refcount: *isize, amount: isize) callconv(.C) void {
         // As such, we do not need to cap incrementing.
         switch (RC_TYPE) {
             .normal => {
-                if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+                if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
                     const old = @as(usize, @bitCast(refcount));
                     const new = old + @as(usize, @intCast(amount));
 
@@ -236,7 +278,7 @@ pub fn decrefRcPtrC(
     bytes_or_null: ?[*]isize,
     alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) void {
+) callconv(cc) void {
     // IMPORTANT: bytes_or_null is this case is expected to be a pointer to the refcount
     // (NOT the start of the data, or the start of the allocation)
 
@@ -250,7 +292,7 @@ pub fn decrefCheckNullC(
     bytes_or_null: ?[*]u8,
     alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) void {
+) callconv(cc) void {
     if (bytes_or_null) |bytes| {
         const isizes: [*]isize = @as([*]isize, @ptrCast(@alignCast(bytes)));
         return @call(.always_inline, decref_ptr_to_refcount, .{ isizes - 1, alignment, elements_refcounted });
@@ -261,7 +303,7 @@ pub fn decrefDataPtrC(
     bytes_or_null: ?[*]u8,
     alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) void {
+) callconv(cc) void {
     const bytes = bytes_or_null orelse return;
 
     const data_ptr = @intFromPtr(bytes);
@@ -277,7 +319,7 @@ pub fn decrefDataPtrC(
 pub fn increfDataPtrC(
     bytes_or_null: ?[*]u8,
     inc_amount: isize,
-) callconv(.C) void {
+) callconv(cc) void {
     const bytes = bytes_or_null orelse return;
 
     const ptr = @intFromPtr(bytes);
@@ -293,7 +335,7 @@ pub fn freeDataPtrC(
     bytes_or_null: ?[*]u8,
     alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) void {
+) callconv(cc) void {
     const bytes = bytes_or_null orelse return;
 
     const ptr = @intFromPtr(bytes);
@@ -310,7 +352,7 @@ pub fn freeRcPtrC(
     bytes_or_null: ?[*]isize,
     alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) void {
+) callconv(cc) void {
     const bytes = bytes_or_null orelse return;
     return free_ptr_to_refcount(bytes, alignment, elements_refcounted);
 }
@@ -346,7 +388,7 @@ inline fn free_ptr_to_refcount(
     // NOTE: we don't even check whether the refcount is "infinity" here!
     dealloc(allocation_ptr, alignment);
 
-    if (DEBUG_ALLOC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_ALLOC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("💀 freed {*}\n", .{allocation_ptr});
     }
 }
@@ -358,7 +400,7 @@ inline fn decref_ptr_to_refcount(
 ) void {
     if (RC_TYPE == .none) return;
 
-    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("| decrement {*}: ", .{refcount_ptr});
     }
 
@@ -371,7 +413,7 @@ inline fn decref_ptr_to_refcount(
     if (!rcConstant(refcount)) {
         switch (RC_TYPE) {
             .normal => {
-                if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+                if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
                     const old = @as(usize, @bitCast(refcount));
                     const new = @as(usize, @bitCast(refcount_ptr[0] -% 1));
 
@@ -396,7 +438,7 @@ inline fn decref_ptr_to_refcount(
 
 pub fn isUnique(
     bytes_or_null: ?[*]u8,
-) callconv(.C) bool {
+) callconv(cc) bool {
     const bytes = bytes_or_null orelse return true;
 
     const ptr = @intFromPtr(bytes);
@@ -407,7 +449,7 @@ pub fn isUnique(
 
     const refcount = (isizes - 1)[0];
 
-    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_INCDEC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("| is unique {*}\n", .{isizes - 1});
     }
 
@@ -495,7 +537,7 @@ pub fn allocateWithRefcountC(
     data_bytes: usize,
     element_alignment: u32,
     elements_refcounted: bool,
-) callconv(.C) [*]u8 {
+) callconv(cc) [*]u8 {
     return allocateWithRefcount(data_bytes, element_alignment, elements_refcounted);
 }
 
@@ -514,7 +556,7 @@ pub fn allocateWithRefcount(
 
     const new_bytes: [*]u8 = alloc(length, alignment) orelse unreachable;
 
-    if (DEBUG_ALLOC and builtin.target.cpu.arch != .wasm32) {
+    if (DEBUG_ALLOC and builtin.target.cpu.arch != .wasm32 and !is_solana) {
         std.debug.print("+ allocated {*} ({} bytes with alignment {})\n", .{ new_bytes, data_bytes, alignment });
     }
 
@@ -591,6 +633,6 @@ test "increfC, static data" {
 // Note: On esstentially all OSes, this will be affected by ASLR and different each run.
 // In wasm, the value will be constant to the build as a whole.
 // Either way, it can not be know by an attacker unless they get access to the executable.
-pub fn dictPseudoSeed() callconv(.C) u64 {
+pub fn dictPseudoSeed() callconv(cc) u64 {
     return @as(u64, @intCast(@intFromPtr(&dictPseudoSeed)));
 }

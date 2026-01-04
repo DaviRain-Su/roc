@@ -30,6 +30,7 @@ target-arm = ["roc_build/target-arm", "roc_repl_cli/target-arm"]
 target-wasm32 = ["roc_build/target-wasm32"]
 target-x86 = ["roc_build/target-x86", "roc_repl_cli/target-x86"]
 target-x86_64 = ["roc_build/target-x86_64", "roc_repl_cli/target-x86_64"]
+target-bpf = ["roc_build/target-bpf"]
 
 target-all = [
     "target-aarch64",
@@ -37,6 +38,7 @@ target-all = [
     "target-x86",
     "target-x86_64",
     "target-wasm32",
+    "target-bpf",
 ]
 
 sanitizers = ["roc_build/sanitizers"]

@@ -840,17 +840,39 @@ impl<'ctx> BitcodeReturnValue<'ctx> {
         arguments: &[BasicValueEnum<'ctx>],
         fn_name: &str,
     ) -> BasicValueEnum<'ctx> {
+        // SBF builtins return structs by value, not via sret pointer
+        let is_sbf = env.target.architecture() == roc_target::Architecture::Sbf;
+
         match self {
             BitcodeReturnValue::List(result) => {
-                call_void_bitcode_fn(env, arguments, fn_name);
-                env.builder
-                    .new_build_load(zig_list_type(env), *result, "load_list")
+                if is_sbf {
+                    // SBF: function returns struct by value, skip sret pointer argument
+                    let args_without_sret = &arguments[1..]; // Skip the sret pointer
+                    let value = call_bitcode_fn(env, args_without_sret, fn_name);
+                    // Store the returned struct into the alloca
+                    env.builder.new_build_store(*result, value);
+                    env.builder
+                        .new_build_load(zig_list_type(env), *result, "load_list")
+                } else {
+                    call_void_bitcode_fn(env, arguments, fn_name);
+                    env.builder
+                        .new_build_load(zig_list_type(env), *result, "load_list")
+                }
             }
             BitcodeReturnValue::Str(result) => {
-                call_void_bitcode_fn(env, arguments, fn_name);
-
-                // we keep a string in the alloca
-                (*result).into()
+                if is_sbf {
+                    // SBF: function returns struct by value, skip sret pointer argument
+                    let args_without_sret = &arguments[1..]; // Skip the sret pointer
+                    let value = call_bitcode_fn(env, args_without_sret, fn_name);
+                    // Store the returned struct into the alloca
+                    env.builder.new_build_store(*result, value);
+                    // we keep a string in the alloca
+                    (*result).into()
+                } else {
+                    call_void_bitcode_fn(env, arguments, fn_name);
+                    // we keep a string in the alloca
+                    (*result).into()
+                }
             }
             BitcodeReturnValue::Basic => call_bitcode_fn(env, arguments, fn_name),
         }
@@ -1133,14 +1155,24 @@ pub(crate) fn call_str_bitcode_fn<'ctx>(
 
             returns.call_and_load_32bit(env, &arguments, fn_name)
         }
-        X86_64 | Aarch64 => {
+        X86_64 | Aarch64 | Sbf => {
+            let is_sbf = env.target.architecture() == Sbf;
             let capacity = other_arguments.len() + strings.len() + returns.additional_arguments();
             let mut arguments: Vec<BasicValueEnum> = Vec::with_capacity_in(capacity, env.arena);
 
             let return_value = returns.return_value_64bit(env, &mut arguments);
 
             for string in strings {
-                arguments.push(pass_string_to_zig_64bit(env, *string).into());
+                let str_ptr = pass_string_to_zig_64bit(env, *string);
+                if is_sbf {
+                    // SBF: load struct value from pointer (builtins expect by-value args)
+                    let str_type = super::convert::zig_str_type(env);
+                    let str_value = env.builder.new_build_load(str_type, str_ptr, "load_str");
+                    arguments.push(str_value);
+                } else {
+                    // x86_64/aarch64: pass pointer directly (sret convention)
+                    arguments.push(str_ptr.into());
+                }
             }
 
             arguments.extend(other_arguments);
@@ -1188,12 +1220,20 @@ pub(crate) fn call_void_list_bitcode_fn<'ctx>(
 
             call_void_bitcode_fn(env, &arguments, fn_name);
         }
-        X86_64 | Aarch64 => {
+        X86_64 | Aarch64 | Sbf => {
+            let is_sbf = env.target.architecture() == Sbf;
             let capacity = other_arguments.len() + lists.len();
             let mut arguments: Vec<BasicValueEnum> = Vec::with_capacity_in(capacity, env.arena);
 
             for list in lists {
-                arguments.push(pass_list_to_zig_64bit(env, (*list).into()).into());
+                let list_ptr = pass_list_to_zig_64bit(env, (*list).into());
+                if is_sbf {
+                    let list_type = super::convert::zig_list_type(env);
+                    let list_value = env.builder.new_build_load(list_type, list_ptr, "load_list");
+                    arguments.push(list_value);
+                } else {
+                    arguments.push(list_ptr.into());
+                }
             }
 
             arguments.extend(other_arguments);
@@ -1240,14 +1280,22 @@ pub(crate) fn call_list_bitcode_fn<'ctx>(
 
             returns.call_and_load_32bit(env, &arguments, fn_name)
         }
-        X86_64 | Aarch64 => {
+        X86_64 | Aarch64 | Sbf => {
+            let is_sbf = env.target.architecture() == Sbf;
             let capacity = other_arguments.len() + lists.len() + returns.additional_arguments();
             let mut arguments: Vec<BasicValueEnum> = Vec::with_capacity_in(capacity, env.arena);
 
             let return_value = returns.return_value_64bit(env, &mut arguments);
 
             for list in lists {
-                arguments.push(pass_list_to_zig_64bit(env, (*list).into()).into());
+                let list_ptr = pass_list_to_zig_64bit(env, (*list).into());
+                if is_sbf {
+                    let list_type = super::convert::zig_list_type(env);
+                    let list_value = env.builder.new_build_load(list_type, list_ptr, "load_list");
+                    arguments.push(list_value);
+                } else {
+                    arguments.push(list_ptr.into());
+                }
             }
 
             arguments.extend(other_arguments);
