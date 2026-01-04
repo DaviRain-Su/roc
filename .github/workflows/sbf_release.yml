@@ -112,47 +112,55 @@ jobs:
 
   build-linux-arm64:
     name: Build Linux ARM64
-    runs-on: ubuntu-22.04
-    timeout-minutes: 150
+    runs-on: ubuntu-24.04-arm64
+    timeout-minutes: 120
     
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
+      - name: Install LLVM 18
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 18
+          sudo apt-get install -y llvm-18-dev libpolly-18-dev liblld-18-dev libclang-18-dev
 
-      - name: Build in ARM64 container
-        uses: uraimo/run-on-arch-action@v2
-        with:
-          arch: aarch64
-          distro: ubuntu22.04
-          githubToken: ${{ github.token }}
-          install: |
-            apt-get update
-            apt-get install -y wget curl build-essential pkg-config libssl-dev zlib1g-dev xz-utils bzip2 lsb-release software-properties-common gnupg git
-            wget https://apt.llvm.org/llvm.sh
-            chmod +x llvm.sh
-            ./llvm.sh 18
-            apt-get install -y llvm-18-dev libpolly-18-dev liblld-18-dev libclang-18-dev
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-v1.52.0"
-            wget "${SOLANA_ZIG_URL}/zig-aarch64-linux-musl.tar.bz2"
-            tar -xjf zig-aarch64-linux-musl.tar.bz2
-            mv zig-aarch64-linux-musl-baseline /opt/solana-zig
-          env: |
-            LLVM_SYS_180_PREFIX: /usr/lib/llvm-18
-          run: |
-            export PATH="/opt/solana-zig:$HOME/.cargo/bin:$PATH"
-            export LLVM_SYS_180_PREFIX=/usr/lib/llvm-18
-            git config --global --add safe.directory /home/runner/work/roc/roc
-            zig version
-            ./ci/write_version.sh
-            cd crates/compiler/builtins/bitcode && zig build ir-sbf && cd ../../../..
-            cargo build --profile=release-with-lto --locked --features target-bpf --bin roc --bin roc_language_server
-            strip ./target/release-with-lto/roc
-            strip ./target/release-with-lto/roc_language_server
+      - name: Set LLVM environment
+        run: echo "LLVM_SYS_180_PREFIX=/usr/lib/llvm-18" >> $GITHUB_ENV
+
+      - name: Install solana-zig
+        run: |
+          SOLANA_ZIG_URL="https://github.com/joncinque/solana-zig-bootstrap/releases/download/solana-${{ env.SOLANA_ZIG_VERSION }}"
+          wget "${SOLANA_ZIG_URL}/zig-aarch64-linux-musl.tar.bz2"
+          tar -xjf zig-aarch64-linux-musl.tar.bz2
+          mv zig-aarch64-linux-musl-baseline solana-zig
+          echo "$PWD/solana-zig" >> $GITHUB_PATH
+          ./solana-zig/zig version
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Create version.txt
+        run: ./ci/write_version.sh
+
+      - name: Build SBF builtins
+        run: |
+          cd crates/compiler/builtins/bitcode
+          zig build ir-sbf
+
+      - name: Build Roc with SBF support
+        run: |
+          cargo build \
+            --profile=release-with-lto \
+            --locked \
+            --features target-bpf \
+            --bin roc \
+            --bin roc_language_server
+
+      - name: Strip binaries
+        run: |
+          strip ./target/release-with-lto/roc
+          strip ./target/release-with-lto/roc_language_server
 
       - name: Get version info
         run: |
