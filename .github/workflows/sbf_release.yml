@@ -58,7 +58,7 @@ jobs:
       - name: Build SBF builtins
         run: |
           cd crates/compiler/builtins/bitcode
-          zig build ir-sbf
+          $GITHUB_WORKSPACE/solana-zig/zig build ir-sbf
 
       - name: Build Roc with SBF support
         run: |
@@ -120,7 +120,7 @@ jobs:
 
       - name: Install LLVM 18 and dependencies
         run: |
-          brew install llvm@18 zstd zig
+          brew install llvm@18 zstd
           echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix zstd)/lib:$(brew --prefix)/lib" >> $GITHUB_ENV
 
