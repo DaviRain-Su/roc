@@ -120,7 +120,7 @@ jobs:
 
       - name: Install LLVM 18 and dependencies
         run: |
-          brew install llvm@18 zstd
+          brew install llvm@18 zstd zig
           echo "LLVM_SYS_180_PREFIX=$(brew --prefix llvm@18)" >> $GITHUB_ENV
           echo "LIBRARY_PATH=$(brew --prefix zstd)/lib:$(brew --prefix)/lib" >> $GITHUB_ENV
 
@@ -130,7 +130,6 @@ jobs:
           curl -LO "${SOLANA_ZIG_URL}/zig-aarch64-macos-none.tar.bz2"
           tar -xjf zig-aarch64-macos-none.tar.bz2
           mv zig-aarch64-macos-none-baseline solana-zig
-          echo "$PWD/solana-zig" >> $GITHUB_PATH
           ./solana-zig/zig version
 
       - name: Install Rust
@@ -142,7 +141,7 @@ jobs:
       - name: Build SBF builtins
         run: |
           cd crates/compiler/builtins/bitcode
-          zig build ir-sbf
+          $GITHUB_WORKSPACE/solana-zig/zig build ir-sbf
 
       - name: Build Roc with SBF support
         run: |
