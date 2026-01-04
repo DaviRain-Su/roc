@@ -27,6 +27,11 @@ case $(uname -s) in
     ;;
   "Darwin")
     os="macos"
+    if [[ "$arch" == "x86_64" ]]; then
+      echo "Error: macOS x86_64 (Intel) is not supported." >&2
+      echo "Only macOS ARM64 (Apple Silicon M1/M2/M3) is available." >&2
+      exit 1
+    fi
     ;;
   *)
     echo "install-roc-sbf.sh: Unsupported OS: $(uname -s)" >&2
