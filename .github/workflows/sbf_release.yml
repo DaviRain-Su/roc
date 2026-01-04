@@ -2,6 +2,8 @@ name: SBF Release Build
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'sbf-v*'
   workflow_dispatch:
