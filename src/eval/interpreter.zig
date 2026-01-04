@@ -10272,8 +10272,13 @@ pub const Interpreter = struct {
             arg_rt_vars: []const types.Var,
             /// Tag expression index (for type info)
             expr_idx: can.CIR.Expr.Idx,
-            /// Runtime type variable for the tag union
+            /// Runtime type variable for the tag union (may be nominal wrapper).
+            /// Used for type identity and method dispatch.
             rt_var: types.Var,
+            /// Unwrapped type variable for layout calculation.
+            /// For nominal types, this is the backing type; otherwise same as rt_var.
+            /// Using this for layout ensures consistency with how the value was created.
+            layout_rt_var: types.Var,
             /// Tag index (discriminant)
             tag_index: usize,
             /// Layout type: 0=record, 1=tuple
@@ -12001,7 +12006,10 @@ pub const Interpreter = struct {
                 };
                 // Use the resolved (unwrapped) type's layout, not the nominal wrapper's layout.
                 // This ensures we get the actual tag union layout instead of a box wrapper.
-                const layout_val = try self.getRuntimeLayout(resolved.var_);
+                // We store resolved.var_ as layout_rt_var for consistent layout calculation,
+                // while keeping rt_var for type identity and method dispatch.
+                const layout_rt_var = resolved.var_;
+                const layout_val = try self.getRuntimeLayout(layout_rt_var);
 
                 if (layout_val.tag == .scalar) {
                     // No payload union - just set discriminant
@@ -12038,6 +12046,7 @@ pub const Interpreter = struct {
                             .arg_rt_vars = arg_rt_vars,
                             .expr_idx = expr_idx,
                             .rt_var = rt_var,
+                            .layout_rt_var = layout_rt_var,
                             .tag_index = tag_index,
                             .layout_type = layout_type,
                         } } });
@@ -13184,6 +13193,23 @@ pub const Interpreter = struct {
                 self.triggerCrash("e_zero_argument_tag: tuple tag field is not scalar int", false, roc_ops);
                 return error.Crash;
             }
+            return dest;
+        } else if (layout_val.tag == .tag_union) {
+            // Tag union layout with proper variant info - for recursive types like Nat := [Zero, Suc(Box(Nat))]
+            var dest = try self.pushRaw(layout_val, 0, rt_var);
+            const tu_idx = layout_val.data.tag_union.idx;
+            const tu_data = self.runtime_layout_store.getTagUnionData(tu_idx);
+            const disc_offset = self.runtime_layout_store.getTagUnionDiscriminantOffset(tu_idx);
+            if (dest.ptr) |base_ptr| {
+                const ptr_u8: [*]u8 = @ptrCast(base_ptr);
+                // Clear the entire payload area first (ZST variant has no payload but we still need to clear)
+                const total_size = self.runtime_layout_store.layoutSize(layout_val);
+                if (total_size > 0) {
+                    @memset(ptr_u8[0..total_size], 0);
+                }
+                tu_data.writeDiscriminantToPtr(ptr_u8 + disc_offset, @intCast(tag_index));
+            }
+            dest.is_initialized = true;
             return dest;
         }
         self.triggerCrash("e_zero_argument_tag: unexpected layout type", false, roc_ops);
@@ -15029,6 +15055,7 @@ pub const Interpreter = struct {
                         .arg_rt_vars = tc.arg_rt_vars,
                         .expr_idx = tc.expr_idx,
                         .rt_var = tc.rt_var,
+                        .layout_rt_var = tc.layout_rt_var,
                         .tag_index = tc.tag_index,
                         .layout_type = tc.layout_type,
                     } } });
@@ -15049,12 +15076,15 @@ pub const Interpreter = struct {
                         values[i] = value_stack.pop() orelse return error.Crash;
                     }
 
-                    // Get the layout from the original type (tc.rt_var).
+                    // Get the layout from the unwrapped type (tc.layout_rt_var).
+                    // This ensures consistency with how the tag value was created - we use
+                    // the backing type's layout, not a nominal wrapper's layout which might
+                    // be different (e.g., box instead of scalar).
                     // Note: For polymorphic types, this layout may have incorrect payload sizes
                     // (e.g., flex vars default to Dec/ZST). The branches below handle this
                     // by checking actual value sizes and using properly-typed layouts when needed.
                     // See https://github.com/roc-lang/roc/issues/8872
-                    const layout_val = try self.getRuntimeLayout(tc.rt_var);
+                    const layout_val = try self.getRuntimeLayout(tc.layout_rt_var);
 
                     if (tc.layout_type == 0) {
                         // Record layout { tag, payload }
